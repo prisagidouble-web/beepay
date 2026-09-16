@@ -32,26 +32,22 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Admin directory.
-    // Bootstrap these documents manually from Firebase Console
-    // or trusted server tooling. Clients cannot create/modify
-    // their own admin access.
+
+
+    // Admin directory. Bootstrap these documents manually from Firebase Console
+    // or trusted server tooling. Clients cannot create/modify their own admin access.
     match /admin_users/{uid} {
       allow read: if isSelf(uid);
       allow write: if false;
     }
 
-    // User profile.
-    // User can read/update only their own non-privileged profile.
+    // User profile: user can read/update only their own non-privileged profile.
+    // Privileged fields such as role must be controlled by trusted backend/Admin SDK.
     match /users/{uid} {
-      allow read: if isSelf(uid) ||
-        hasAnyRole(['SUPER_ADMIN', 'SUPPORT', 'EVENT_ADMIN', 'FINANCE', 'AUDITOR']);
-
+      allow read: if isSelf(uid) || hasAnyRole(['SUPER_ADMIN', 'SUPPORT', 'EVENT_ADMIN', 'FINANCE', 'AUDITOR']);
       allow create: if isSelf(uid);
-
       allow update: if isSelf(uid)
         && request.resource.data.role == resource.data.role;
-
       allow delete: if false;
     }
 
@@ -61,64 +57,35 @@ service cloud.firestore {
       allow create, update, delete: if isRole('SUPER_ADMIN');
     }
 
-    // =========================================================
-    // PAYMENT INTENTS
-    // =========================================================
-    //
-    // Phase 21 frontend currently creates Payment Intent directly
-    // from the authenticated admin client.
-    //
-    // Initial client-created status:
-    // REQUIRES_PAYMENT
-    //
-    // created_by must equal the authenticated admin UID.
-    //
-    // Payment status must NOT be changed by the client.
-    // PAID/SUCCEEDED and ticket activation remain trusted-backend
-    // operations.
+    // Payment intents: users can create their own pending intent.
+    // Payment state cannot be promoted by the client.
     match /payment_intents/{intentId} {
-
-      // Admin/authorized finance/event roles can read intents.
-      // The creator can also read the intent.
+      // Admin console may create a payment intent in REQUIRES_PAYMENT state.
+      // A normal signed-in user may create only their own PENDING intent.
       allow read: if signedIn() &&
-        (
-          hasAnyRole([
-            'SUPER_ADMIN',
-            'FINANCE',
-            'EVENT_ADMIN',
-            'AUDITOR'
-          ]) ||
-          resource.data.created_by == request.auth.uid
-        );
+        (resource.data.user_id == request.auth.uid ||
+         hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']));
 
-      // Authorized admin roles may create a Payment Intent.
-      //
-      // The browser must identify the authenticated admin as
-      // created_by and the initial state must be
-      // REQUIRES_PAYMENT.
-      allow create: if signedIn() &&
-        hasAnyRole([
-          'SUPER_ADMIN',
-          'FINANCE',
-          'EVENT_ADMIN'
-        ]) &&
-        request.resource.data.created_by == request.auth.uid &&
-        request.resource.data.status == 'REQUIRES_PAYMENT';
+      allow create: if
+        (hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN']) &&
+         request.resource.data.status == 'REQUIRES_PAYMENT' &&
+         request.resource.data.created_by == request.auth.uid)
+        ||
+        (signedIn() &&
+         request.resource.data.user_id == request.auth.uid &&
+         request.resource.data.status == 'PENDING');
 
-      // Client cannot modify or delete a Payment Intent.
-      // Payment state changes belong to trusted backend/webhook flow.
       allow update, delete: if false;
     }
 
-    // Orders.
+    // Orders: clients can create/read their own orders; payment/ticket state
+    // is trusted-backend controlled.
     match /orders/{orderId} {
       allow read: if signedIn() &&
         (resource.data.user_id == request.auth.uid ||
          hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'SUPPORT', 'AUDITOR']));
-
       allow create: if signedIn() &&
         request.resource.data.user_id == request.auth.uid;
-
       allow update, delete: if false;
     }
 
@@ -126,7 +93,6 @@ service cloud.firestore {
     match /payment_ledger/{ledgerId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']) ||
         (signedIn() && resource.data.user_id == request.auth.uid);
-
       allow write: if false;
     }
 
@@ -140,17 +106,14 @@ service cloud.firestore {
     match /payment_verifications/{verificationId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']) ||
         (signedIn() && resource.data.user_id == request.auth.uid);
-
       allow write: if false;
     }
 
-    // Tickets: client may read their own ticket.
-    // Creation/status changes are trusted backend only.
+    // Tickets: client may read their own ticket. Creation/status changes are trusted backend only.
     match /tickets/{ticketId} {
       allow read: if signedIn() &&
         (resource.data.user_id == request.auth.uid ||
          hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN', 'SUPPORT', 'AUDITOR']));
-
       allow create, update, delete: if false;
     }
 
@@ -187,8 +150,7 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Final audit records are evidence only;
-    // they cannot grant production approval.
+    // Final audit records are evidence only; they cannot grant production approval.
     match /final_audits/{auditId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
       allow create: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR']);
