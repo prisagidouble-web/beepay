@@ -65,74 +65,105 @@ function processSandboxAudit(body) {
     throw new Error("Akun tidak memiliki akses admin BeePay.");
   }
 
-  /*
-   * READ-ONLY audit.
-   * Select the latest sandbox run as the batch anchor, then select the
-   * latest SUCCESS/PENDING/FAILED runs belonging to the same event, user,
-   * and amount. This prevents the audit from mixing an old 75k run with
-   * a newer 100k test batch.
-   */
-  const allRuns = listDocuments("sandbox_runs", 200)
+  // READ-ONLY: choose the newest complete SUCCESS/PENDING/FAILED batch.
+  // A batch is defined by the same event_id + user_id + amount and must
+  // contain all three sandbox outcomes. No Firestore data is modified.
+  const allRuns = listDocuments("sandbox_runs", 500)
     .filter(function(r) {
-      const d = r.data || {};
-      const outcome = String(d.outcome || "").toUpperCase();
-      return d.production === false && ["SUCCESS", "PENDING", "FAILED"].includes(outcome);
-    })
-    .sort(function(a, b) {
-      return new Date(b.data.created_at || 0).getTime() - new Date(a.data.created_at || 0).getTime();
+      return r.data && r.data.production === false && String(r.data.currency || "IDR").toUpperCase() === "IDR";
     });
 
   const outcomes = ["SUCCESS", "PENDING", "FAILED"];
-  const anchor = allRuns[0] || null;
-  const selected = {};
+  const groups = {};
+  allRuns.forEach(function(r) {
+    const d = r.data || {};
+    const outcome = String(d.outcome || "").toUpperCase();
+    if (outcomes.indexOf(outcome) < 0) return;
+    const key = String(d.event_id || "") + "|" + String(d.user_id || "") + "|" + String(d.amount || "");
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(r);
+  });
 
-  if (anchor) {
-    const anchorEventId = String(anchor.data.event_id || "");
-    const anchorUserId = String(anchor.data.user_id || "");
-    const expectedAmount = Number(anchor.data.amount);
-
-    outcomes.forEach(function(outcome) {
-      selected[outcome] = allRuns.find(function(r) {
-        const d = r.data || {};
-        return String(d.outcome || "").toUpperCase() === outcome &&
-          String(d.event_id || "") === anchorEventId &&
-          String(d.user_id || "") === anchorUserId &&
-          Number(d.amount) === expectedAmount;
-      }) || null;
-    });
+  function runTime(r) {
+    const t = new Date((r.data && r.data.created_at) || 0).getTime();
+    return isNaN(t) ? 0 : t;
   }
 
-  const expectedAmount = anchor ? Number(anchor.data.amount) : null;
+  const completeGroups = Object.keys(groups).map(function(key) {
+    const items = groups[key];
+    const byOutcome = {};
+    outcomes.forEach(function(outcome) {
+      byOutcome[outcome] = items.filter(function(r) {
+        return String(r.data.outcome || "").toUpperCase() === outcome;
+      }).sort(function(a,b){ return runTime(b) - runTime(a); })[0] || null;
+    });
+    if (!byOutcome.SUCCESS || !byOutcome.PENDING || !byOutcome.FAILED) return null;
+    const newest = Math.max(runTime(byOutcome.SUCCESS), runTime(byOutcome.PENDING), runTime(byOutcome.FAILED));
+    return {key:key, byOutcome:byOutcome, newest:newest};
+  }).filter(Boolean).sort(function(a,b){ return b.newest - a.newest; });
+
+  if (!completeGroups.length) {
+    return {
+      success: false,
+      environment: "SANDBOX",
+      readOnly: true,
+      overall: "FAIL",
+      summary: "Sandbox audit gagal: batch SUCCESS/PENDING/FAILED lengkap tidak ditemukan.",
+      passCount: 0,
+      failCount: 0,
+      checked: 0,
+      results: [],
+      checks: [],
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  const selected = completeGroups[0].byOutcome;
+  const selectedAmount = Number(selected.SUCCESS.data.amount);
+  const selectedEventId = String(selected.SUCCESS.data.event_id || "");
+  const selectedUserId = String(selected.SUCCESS.data.user_id || "");
+
+  // Ensure all three selected runs belong to exactly the same test batch.
+  outcomes.forEach(function(outcome) {
+    if (String(selected[outcome].data.event_id || "") !== selectedEventId ||
+        String(selected[outcome].data.user_id || "") !== selectedUserId ||
+        Number(selected[outcome].data.amount) !== selectedAmount) {
+      throw new Error("Batch sandbox tidak konsisten: event/user/amount berbeda.");
+    }
+  });
+
   const checks = [];
   function check(name, pass, detail) {
     checks.push({name:name, pass:Boolean(pass), detail:String(detail || "")});
   }
   function related(collection, field, value) {
-    if (!value) return [];
-    return listDocuments(collection, 200).filter(function(r) {
+    return listDocuments(collection, 500).filter(function(r) {
       return String(r.data[field] || "") === String(value);
     });
   }
 
+  check("BATCH: same event", outcomes.every(function(o){return String(selected[o].data.event_id || "") === selectedEventId;}), "event_id=" + selectedEventId);
+  check("BATCH: same user", outcomes.every(function(o){return String(selected[o].data.user_id || "") === selectedUserId;}), "user_id=" + selectedUserId);
+  check("BATCH: amount 100000 IDR", selectedAmount === 100000, "amount=" + selectedAmount + " IDR");
+
+  const resultRows = [];
+
   outcomes.forEach(function(outcome) {
     const run = selected[outcome];
-    check(outcome + ": run ditemukan", !!run,
-      run ? run.id + " · amount=" + run.data.amount + " · event=" + run.data.event_id + " · user=" + run.data.user_id : "Run tidak ditemukan dalam batch terbaru");
-    if (!run) return;
-
-    const d = run.data;
+    const d = run.data || {};
+    const runId = String(d.sandbox_run_id || run.id || "");
     const intentId = String(d.sandbox_payment_intent_id || "");
     const txId = String(d.sandbox_transaction_id || "");
     const ref = String(d.sandbox_reference || "");
 
-    check(outcome + ": amount sesuai batch", Number(d.amount) === expectedAmount,
-      "amount=" + d.amount + ", expected=" + expectedAmount);
+    check(outcome + ": run exists", !!run, runId || "missing");
+    check(outcome + ": amount", Number(d.amount) === selectedAmount && String(d.currency || "IDR").toUpperCase() === "IDR",
+      "amount=" + d.amount + " " + (d.currency || "IDR"));
     check(outcome + ": production=false", d.production === false, "production=" + d.production);
-    check(outcome + ": trusted sandbox", d.real_bank_called === false,
-      "real_bank_called=" + d.real_bank_called);
+    check(outcome + ": trusted sandbox", d.real_bank_called === false, "real_bank_called=" + d.real_bank_called);
     check(outcome + ": Run → Payment Intent", !!intentId, intentId || "missing");
-    check(outcome + ": Run → Transaction", !!txId,
-      txId || "missing");
+    check(outcome + ": Run → Transaction ID", !!txId, txId || "missing");
+    check(outcome + ": Run → reference", !!ref, ref || "missing");
 
     const intent = intentId ? getDocument("payment_intents", intentId) : null;
     const tx = txId ? getDocument("transactions", txId) : null;
@@ -140,102 +171,95 @@ function processSandboxAudit(body) {
     const txData = tx ? decodeFirestoreFields(tx.fields || {}) : null;
 
     check(outcome + ": Payment Intent exists", !!intentData, intentData ? "OK" : "missing");
-    check(outcome + ": Transaction exists", !!txData,
-      txData ? "OK" : "missing");
+    check(outcome + ": Payment Intent trusted", !!intentData && intentData.trusted === true && intentData.production === false,
+      intentData ? "trusted=" + intentData.trusted + ", production=" + intentData.production : "missing");
+
+    let ticketStatus = "NO ACTIVE ticket";
+    let ticketId = null;
 
     if (outcome === "SUCCESS") {
-      check("SUCCESS: payment intent SUCCEEDED", !!intentData && intentData.status === "SUCCEEDED" && intentData.trusted === true && intentData.production === false,
-        intentData ? "status="+intentData.status+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
-      check("SUCCESS: payment PAID", !!txData && txData.status === "PAID" && Number(txData.amount) === expectedAmount && txData.trusted === true && txData.production === false,
-        txData ? "status="+txData.status+", amount="+txData.amount+", trusted="+txData.trusted+", production="+txData.production : "missing");
+      check("SUCCESS: transaction exists", !!txData, txData ? "OK" : "missing");
+      check("SUCCESS: payment intent SUCCEEDED", !!intentData && intentData.status === "SUCCEEDED",
+        intentData ? "status=" + intentData.status : "missing");
+      check("SUCCESS: transaction PAID", !!txData && txData.status === "PAID" && Number(txData.amount) === selectedAmount && txData.trusted === true && txData.production === false,
+        txData ? "status=" + txData.status + ", amount=" + txData.amount : "missing");
+
       const payments = related("payments", "transaction_id", txId).concat(related("payments", "payment_intent_id", intentId));
       const payment = payments[0] ? payments[0].data : null;
-      check("SUCCESS: payment record PAID", !!payment && payment.status === "PAID" && Number(payment.amount) === expectedAmount && payment.trusted === true && payment.production === false,
-        payment ? "status="+payment.status+", amount="+payment.amount : "missing");
+      check("SUCCESS: payment PAID", !!payment && payment.status === "PAID" && Number(payment.amount) === selectedAmount && payment.trusted === true && payment.production === false,
+        payment ? "status=" + payment.status + ", amount=" + payment.amount : "missing");
+
       const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
       const active = tickets.find(function(t){return t.data.status === "ACTIVE" && t.data.active === true;});
+      ticketStatus = active ? "ACTIVE ticket" : "NO ACTIVE ticket";
+      ticketId = active ? String(active.data.ticket_id || active.id || "") : null;
       check("SUCCESS: ticket ACTIVE", !!active && active.data.activated_by_backend === true && active.data.activation_source === "SANDBOX_TRUSTED_BACKEND" && active.data.production === false,
-        active ? "ticket="+(active.data.ticket_id || active.id)+", status="+active.data.status : "ACTIVE ticket missing");
+        active ? "ticket=" + ticketId + ", status=" + active.data.status : "ACTIVE ticket missing");
+      check("SUCCESS: ticket relationship", !!active && String(active.data.transaction_id || "") === txId && String(active.data.payment_intent_id || "") === intentId,
+        active ? "transaction_id=" + active.data.transaction_id + ", payment_intent_id=" + active.data.payment_intent_id : "missing");
     } else if (outcome === "PENDING") {
-      check("PENDING: payment intent PROCESSING", !!intentData && intentData.status === "PROCESSING" && intentData.trusted === true && intentData.production === false,
-        intentData ? "status="+intentData.status+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
-      check("PENDING: payment PENDING", !!txData && txData.status === "PENDING" && Number(txData.amount) === expectedAmount && txData.trusted === true && txData.production === false,
-        txData ? "status="+txData.status+", amount="+txData.amount : "missing");
+      check("PENDING: transaction exists", !!txData, txData ? "OK" : "missing");
+      check("PENDING: payment intent PROCESSING", !!intentData && intentData.status === "PROCESSING",
+        intentData ? "status=" + intentData.status : "missing");
+      check("PENDING: transaction PENDING", !!txData && txData.status === "PENDING" && Number(txData.amount) === selectedAmount && txData.trusted === true && txData.production === false,
+        txData ? "status=" + txData.status + ", amount=" + txData.amount : "missing");
       const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
-      check("PENDING: no ACTIVE ticket", !tickets.some(function(t){return t.data.status === "ACTIVE" && t.data.active === true;}),
-        tickets.length ? tickets.length + " related ticket(s)" : "No related ticket");
+      const active = tickets.find(function(t){return t.data.status === "ACTIVE" && t.data.active === true;});
+      ticketStatus = active ? "ACTIVE ticket detected" : "NO ACTIVE ticket";
+      ticketId = active ? String(active.data.ticket_id || active.id || "") : null;
+      check("PENDING: no ACTIVE ticket", !active, active ? "unexpected ticket=" + ticketId : "No ACTIVE ticket");
+      check("PENDING: transaction relationship", !!txData && String(txData.payment_intent_id || "") === intentId,
+        txData ? "payment_intent_id=" + txData.payment_intent_id : "missing");
     } else {
-      check("FAILED: payment intent FAILED", !!intentData && intentData.status === "FAILED" && Number(intentData.amount) === expectedAmount && intentData.trusted === true && intentData.production === false,
-        intentData ? "status="+intentData.status+", amount="+intentData.amount+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
+      check("FAILED: transaction absent", !txData, txData ? "unexpected transaction=" + txId : "No transaction by design");
+      check("FAILED: payment intent FAILED", !!intentData && intentData.status === "FAILED" && Number(intentData.amount) === selectedAmount,
+        intentData ? "status=" + intentData.status + ", amount=" + intentData.amount : "missing");
+      const payments = related("payments", "payment_intent_id", intentId);
+      check("FAILED: payment FAILED", payments.length === 0 || payments.every(function(p){return p.data.status === "FAILED";}),
+        payments.length ? payments.length + " payment record(s)" : "No payment record");
       const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
-      check("FAILED: no ACTIVE ticket", !tickets.some(function(t){return t.data.status === "ACTIVE" && t.data.active === true;}),
-        tickets.length ? tickets.length + " related ticket(s)" : "No related ticket");
+      const active = tickets.find(function(t){return t.data.status === "ACTIVE" && t.data.active === true;});
+      ticketStatus = active ? "ACTIVE ticket detected" : "NO ACTIVE ticket";
+      ticketId = active ? String(active.data.ticket_id || active.id || "") : null;
+      check("FAILED: no ACTIVE ticket", !active, active ? "unexpected ticket=" + ticketId : "No ACTIVE ticket");
     }
 
-    check(outcome + ": reference link", !!ref, ref || "sandbox_reference missing");
-  });
-
-  const passedChecks = checks.filter(function(c){return c.pass;}).length;
-  const failedChecks = checks.length - passedChecks;
-  const runResults = outcomes.map(function(outcome) {
-    const r = selected[outcome];
-    if (!r) {
-      return {
-        outcome: outcome,
-        sandboxRunId: null,
-        transactionId: null,
-        paymentIntentId: null,
-        ticketId: null,
-        ticketStatus: "MISSING",
-        status: "MISSING",
-        pass: false
-      };
-    }
-    const txId = String(r.data.sandbox_transaction_id || "");
-    const intentId = String(r.data.sandbox_payment_intent_id || "");
-    const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
-    const active = tickets.find(function(t){return t.data.status === "ACTIVE" && t.data.active === true;}) || null;
-    const relatedChecks = checks.filter(function(c){return String(c.name || "").toUpperCase().startsWith(outcome + ":");});
-    const pass = relatedChecks.length > 0 && relatedChecks.every(function(c){return c.pass === true;});
-    return {
+    resultRows.push({
       outcome: outcome,
-      sandboxRunId: r.id,
+      sandboxRunId: runId,
       transactionId: txId || null,
       paymentIntentId: intentId || null,
-      ticketId: active ? (active.data.ticket_id || active.id) : null,
-      ticketStatus: active ? "ACTIVE" : "NO ACTIVE ticket",
+      ticketId: ticketId,
+      ticketStatus: ticketStatus,
       status: outcome,
-      pass: pass
-    };
+      amount: Number(d.amount || 0),
+      currency: String(d.currency || "IDR")
+    });
   });
 
-  const runPassCount = runResults.filter(function(r){return r.pass;}).length;
-  const runFailCount = runResults.length - runPassCount;
-  const success = !!anchor && runPassCount === outcomes.length;
+  const passCount = resultRows.filter(function(row) {
+    return checks.some(function(c){return c.name.indexOf(row.outcome + ":") === 0 && c.pass === false;}) === false;
+  }).length;
+  const failCount = resultRows.length - passCount;
+  const globalPassed = checks.filter(function(c){return c.pass;}).length;
+  const globalFailed = checks.length - globalPassed;
+  const success = failCount === 0 && globalFailed === 0;
 
   return {
     success: success,
     environment: "SANDBOX",
     readOnly: true,
-    production: false,
-    realBankCalled: false,
-    amount: expectedAmount,
+    amount: selectedAmount,
+    eventId: selectedEventId,
+    userId: selectedUserId,
     overall: success ? "PASS" : "FAIL",
     summary: success ? "Sandbox audit berhasil" : "Sandbox audit menemukan pemeriksaan yang belum sesuai",
-    passCount: passedChecks,
-    failCount: failedChecks,
-    checked: outcomes.length,
-    runPassCount: runPassCount,
-    runFailCount: runFailCount,
+    passCount: passCount,
+    failCount: failCount,
     errorCount: 0,
-    results: runResults,
+    checked: resultRows.length,
+    results: resultRows,
     checks: checks,
-    batch: anchor ? {
-      eventId: anchor.data.event_id || null,
-      userId: anchor.data.user_id || null,
-      amount: expectedAmount,
-      anchorRunId: anchor.id
-    } : null,
     timestamp: new Date().toISOString()
   };
 }
