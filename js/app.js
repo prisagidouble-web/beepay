@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,limit,query,orderBy,serverTimestam
 import{getAuth,onAuthStateChanged,signInWithPopup,GoogleAuthProvider,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"8.0.0",
+version:"20.0.0",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
