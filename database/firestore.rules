@@ -66,16 +66,10 @@ service cloud.firestore {
         (resource.data.user_id == request.auth.uid ||
          hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']));
 
-      allow create: if
-        (hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN']) &&
-         request.resource.data.status == 'REQUIRES_PAYMENT' &&
-         request.resource.data.created_by == request.auth.uid)
-        ||
-        (signedIn() &&
-         request.resource.data.user_id == request.auth.uid &&
-         request.resource.data.status == 'PENDING');
-
-      allow update, delete: if false;
+      // Payment intents are created by the trusted Apps Script backend.
+      // The browser may read authorized intents, but cannot create or alter
+      // payment intent state directly.
+      allow create, update, delete: if false;
     }
 
     // Orders: clients can create/read their own orders; payment/ticket state
