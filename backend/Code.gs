@@ -37,6 +37,9 @@ function doPost(e) {
     if (body.action === "sandbox_audit") {
       return jsonResponse(processSandboxAudit(body));
     }
+    if (body.action === "create_payment_intent") {
+      return jsonResponse(processCreatePaymentIntent(body));
+    }
     return jsonResponse({
       success: false,
       error: "Unknown action",
@@ -308,6 +311,129 @@ function decodeFirestoreFields(fields) {
     else out[key] = null;
   });
   return out;
+}
+
+
+/**
+ * Trusted Payment Intent creation.
+ *
+ * This phase only creates the intent in REQUIRES_PAYMENT state.
+ * It does NOT create a transaction, mark a payment as PAID, or activate a ticket.
+ * All state-changing payment completion remains a trusted-backend concern.
+ */
+function processCreatePaymentIntent(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const orderId = requiredText(body.orderId, "Order ID");
+  const eventId = requiredText(body.eventId, "Event ID");
+  const amount = Number(body.amount);
+  if (!Number.isSafeInteger(amount) || amount < 1) {
+    throw new Error("Amount harus berupa bilangan IDR yang valid.");
+  }
+
+  const channel = String(body.channel || "QRIS").trim().toUpperCase();
+  if (!["QRIS", "BANK_TRANSFER", "VIRTUAL_ACCOUNT"].includes(channel)) {
+    throw new Error("Channel pembayaran tidak valid.");
+  }
+
+  const clientReference = String(body.clientReference || "").trim();
+  const idempotencyKey = requiredText(body.idempotencyKey, "Idempotency key");
+
+  // The intent must be attached to an existing order. This prevents the
+  // browser from inventing a payment intent for an unknown order.
+  const orderDoc = getDocument("orders", orderId);
+  if (!orderDoc || !orderDoc.fields) {
+    throw new Error("Order tidak ditemukan: " + orderId);
+  }
+
+  const order = decodeFirestoreFields(orderDoc.fields || {});
+  if (String(order.event_id || "") !== eventId) {
+    throw new Error("Event ID tidak sesuai dengan order.");
+  }
+  if (Number(order.amount) !== amount) {
+    throw new Error("Nominal tidak sesuai dengan order.");
+  }
+  if (order.currency && String(order.currency).toUpperCase() !== "IDR") {
+    throw new Error("Currency order harus IDR.");
+  }
+
+  // Idempotency: the same key returns the existing intent instead of
+  // creating a second intent. This is read-only until the final write.
+  const existing = listDocuments("payment_intents", 200).find(function(item) {
+    return String(item.data.idempotency_key || "") === idempotencyKey;
+  });
+  if (existing) {
+    const existingData = existing.data;
+    if (
+      String(existingData.order_id || "") !== orderId ||
+      String(existingData.event_id || "") !== eventId ||
+      Number(existingData.amount) !== amount
+    ) {
+      throw new Error("Idempotency key sudah digunakan untuk parameter berbeda.");
+    }
+    return {
+      success: true,
+      existing: true,
+      environment: "SANDBOX",
+      production: false,
+      trusted: true,
+      paymentIntentId: String(existingData.payment_intent_id || existing.id),
+      orderId: orderId,
+      eventId: eventId,
+      amount: amount,
+      currency: "IDR",
+      status: String(existingData.status || "REQUIRES_PAYMENT"),
+      message: "Payment Intent sudah ada untuk idempotency key tersebut.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  const stamp = Date.now();
+  const intentId = "PI-" + stamp;
+  const now = new Date().toISOString();
+
+  createDocument("payment_intents", intentId, {
+    payment_intent_id: str(intentId),
+    order_id: str(orderId),
+    user_id: str(order.user_id || ""),
+    merchant_id: str(order.merchant_id || ""),
+    event_id: str(eventId),
+    payment_method_id: str(order.payment_method_id || ""),
+    amount: integer(amount),
+    currency: str("IDR"),
+    channel: str(channel),
+    client_reference: str(clientReference),
+    idempotency_key: str(idempotencyKey),
+    status: str("REQUIRES_PAYMENT"),
+    provider_reference: str(""),
+    trusted: boolean(true),
+    production: boolean(false),
+    created_by: str(authUser.uid),
+    created_by_backend: boolean(true),
+    created_at: timestamp(now),
+    updated_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    existing: false,
+    environment: "SANDBOX",
+    production: false,
+    trusted: true,
+    paymentIntentId: intentId,
+    orderId: orderId,
+    eventId: eventId,
+    amount: amount,
+    currency: "IDR",
+    status: "REQUIRES_PAYMENT",
+    message: "Payment Intent berhasil dibuat oleh trusted backend. Belum ada payment/transaction/ticket yang dibuat.",
+    timestamp: now
+  };
 }
 
 function processSandboxPayment(body) {
