@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.0.0",
+version:"22.1.0",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -136,9 +136,20 @@ async loadCheckouts(){const list=document.getElementById("checkoutList");if(!db|
 async createIntent(){const m=document.getElementById("intentMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}
 const amount=Number(document.getElementById("intentAmount").value),orderId=document.getElementById("intentOrderId").value.trim(),eventId=document.getElementById("intentEventId").value.trim();
 if(!orderId||!eventId||!Number.isSafeInteger(amount)||amount<1){m.textContent="Order ID, Event ID dan nominal valid wajib diisi.";return}
-const nonce=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}`,intentId=`PI-${Date.now()}`;
-const intent={payment_intent_id:intentId,order_id:orderId,event_id:eventId,amount,currency:"IDR",channel:document.getElementById("intentChannel").value,client_reference:document.getElementById("intentReference").value.trim(),idempotency_key:nonce,status:"REQUIRES_PAYMENT",created_by:currentUser.uid,created_at:serverTimestamp(),updated_at:serverTimestamp()};
-try{await addDoc(collection(db,"payment_intents"),intent);document.getElementById("intentForm").reset();m.textContent=`Payment Intent ${intentId} dibuat. Status: REQUIRES_PAYMENT.`;await this.loadIntents()}catch(e){console.error(e);m.textContent="Gagal membuat intent: "+e.message}},
+const nonce=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}`;
+const channel=document.getElementById("intentChannel").value;
+const clientReference=document.getElementById("intentReference").value.trim();
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+m.textContent="Membuat Payment Intent melalui trusted backend...";
+try{
+  const idToken=await currentUser.getIdToken(true);
+  const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"create_payment_intent",idToken,orderId,eventId,amount,channel,clientReference,idempotencyKey:nonce})});
+  const result=await response.json();
+  if(!result.success)throw new Error(result.error||"Gagal membuat Payment Intent.");
+  document.getElementById("intentForm").reset();
+  m.textContent=`Payment Intent ${result.paymentIntentId} ${result.existing?"sudah ada":"berhasil dibuat"}. Status: ${result.status}. ${result.message||""}`;
+  await this.loadIntents();
+}catch(e){console.error(e);m.textContent="Gagal membuat intent: "+e.message}},
 async loadIntents(){const list=document.getElementById("intentList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"payment_intents"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada payment intent.</div>';return}list.innerHTML=s.docs.map(d=>{const p=d.data();return `<article class="intent-card"><div><h3>${this.escape(p.payment_intent_id||"-")}</h3><div class="meta">Order: ${this.escape(p.order_id||"-")} · Event: ${this.escape(p.event_id||"-")} · ${this.escape(String(p.amount||0))} IDR</div></div><div><div class="meta">${this.escape(p.channel||"-")}</div><span class="status">${this.escape(p.status||"REQUIRES_PAYMENT")}</span></div></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Payment intents belum dapat dibaca. Periksa Rules/index.</div>'}},
 escape(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
 };document.addEventListener("DOMContentLoaded",()=>BeePay.init());
