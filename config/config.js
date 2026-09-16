@@ -8,5 +8,5 @@ window.BeePayConfig = {
     messagingSenderId: "663125265260",
     appId: "1:663125265260:web:1bdf3c3433f2a353bd8149"
   },
-  ENVIRONMENT: "development"
+  ENVIRONMENT: "sandbox"
 };
