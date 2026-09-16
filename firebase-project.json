@@ -1,0 +1,13 @@
+{
+  "projectId": "beepay-2c2dc",
+  "authDomain": "beepay-2c2dc.firebaseapp.com",
+  "storageBucket": "beepay-2c2dc.firebasestorage.app",
+  "messagingSenderId": "663125265260",
+  "appId": "1:663125265260:web:1bdf3c3433f2a353bd8149",
+  "services": [
+    "Authentication",
+    "Cloud Firestore"
+  ],
+  "storage_required": false,
+  "production_bank_credentials_present": false
+}

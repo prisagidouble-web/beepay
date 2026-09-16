@@ -1,0 +1,18 @@
+{
+  "project": "BeePay",
+  "phase": 20,
+  "version": "20.0.0",
+  "incremental": true,
+  "previous_phase_preserved": true,
+  "firebase_project_id": "beepay-2c2dc",
+  "firebase_bound": true,
+  "real_payment_enabled": false,
+  "bank_ntt_enabled": false,
+  "sandbox_enabled": true,
+  "production_approval": false,
+  "added": [
+    "Final pre-production audit",
+    "Final test plan",
+    "Production integration lock"
+  ]
+}
