@@ -1,16 +1,68 @@
 /* Phase 16 Firebase project: beepay-2c2dc. Config is kept in firebase-config.js. */
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
-import{getFirestore,collection,addDoc,getDocs,limit,query,orderBy,serverTimestamp}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
-import{getAuth,onAuthStateChanged,signInWithPopup,GoogleAuthProvider,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,serverTimestamp}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
 version:"20.0.0",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
-bindAuth(){document.getElementById("loginButton")?.addEventListener("click",()=>this.login());document.getElementById("logoutButton")?.addEventListener("click",()=>this.logout())},
-watchAuth(){onAuthStateChanged(auth,async u=>{currentUser=u;const yes=!!u;document.getElementById("authState").textContent=yes?(u.email||"Authenticated"):"Guest";document.getElementById("authMessage").textContent=yes?"Login berhasil.":"Belum login.";document.getElementById("loginButton").hidden=yes;document.getElementById("logoutButton").hidden=!yes;document.getElementById("rolePanel").hidden=!yes;document.getElementById("paymentProcessing").hidden=!yes;if(yes){document.getElementById("adminName").textContent=u.displayName||"Admin";document.getElementById("adminRole").textContent="Authenticated user — authorization enforced later.";await this.loadIntents();await this.loadCheckouts();await this.loadWebhooks();await this.loadVerifications();await this.loadResults();await this.loadTickets();await this.loadReconciliation();await this.loadAudits();await this.loadSandboxRuns();await this.loadFailureTests();await this.loadHealthChecks();await this.loadFinalAudits()}})},
-async login(){if(!auth)return alert("Firebase belum dikonfigurasi.");try{await signInWithPopup(auth,new GoogleAuthProvider())}catch(e){alert("Login gagal: "+e.message)}},
+bindAuth(){
+document.getElementById("adminLoginForm")?.addEventListener("submit",e=>{e.preventDefault();this.login()});
+document.getElementById("logoutButton")?.addEventListener("click",()=>this.logout())
+},
+watchAuth(){onAuthStateChanged(auth,async u=>{
+currentUser=u;
+const yes=!!u;
+document.getElementById("authState").textContent=yes?(u.email||"Authenticated"):"Guest";
+document.getElementById("loginButton").hidden=yes;
+document.getElementById("logoutButton").hidden=!yes;
+document.getElementById("rolePanel").hidden=!yes;
+document.getElementById("paymentProcessing").hidden=!yes;
+if(!yes){document.getElementById("authMessage").textContent="Belum login.";return}
+try{
+  const snap=await getDoc(doc(db,"admin_users",u.uid));
+  if(!snap.exists()){
+    document.getElementById("authMessage").textContent="Akun terautentikasi, tetapi belum terdaftar sebagai admin BeePay.";
+    document.getElementById("adminName").textContent=u.email||"User";
+    document.getElementById("adminRole").textContent="ACCESS DENIED";
+    document.getElementById("paymentProcessing").hidden=true;
+    await signOut(auth);
+    return;
+  }
+  const profile=snap.data();
+  if(profile.active===false){
+    document.getElementById("authMessage").textContent="Akun admin sedang dinonaktifkan.";
+    await signOut(auth);
+    return;
+  }
+  document.getElementById("authMessage").textContent="Login admin berhasil.";
+  document.getElementById("adminName").textContent=profile.name||u.displayName||u.email||"Admin";
+  document.getElementById("adminRole").textContent=`Role: ${profile.role||"ADMIN"}`;
+  await this.loadIntents();await this.loadCheckouts();await this.loadWebhooks();await this.loadVerifications();await this.loadResults();await this.loadTickets();await this.loadReconciliation();await this.loadAudits();await this.loadSandboxRuns();await this.loadFailureTests();await this.loadHealthChecks();await this.loadFinalAudits();
+}catch(e){
+  console.error(e);
+  document.getElementById("authMessage").textContent="Gagal memuat profil admin.";
+  await signOut(auth);
+}
+})},
+async login(){
+if(!auth)return alert("Firebase belum dikonfigurasi.");
+const email=document.getElementById("adminEmail")?.value.trim();
+const password=document.getElementById("adminPassword")?.value||"";
+const msg=document.getElementById("authMessage");
+if(!email||!password){msg.textContent="Email dan password wajib diisi.";return}
+msg.textContent="Memproses login...";
+try{
+  await signInWithEmailAndPassword(auth,email,password);
+  document.getElementById("adminLoginForm")?.reset();
+}catch(e){
+  console.error(e);
+  const map={"auth/invalid-credential":"Email atau password salah.","auth/user-not-found":"Akun admin tidak ditemukan.","auth/wrong-password":"Password salah.","auth/too-many-requests":"Terlalu banyak percobaan. Coba lagi nanti.","auth/invalid-email":"Format email tidak valid."};
+  msg.textContent=map[e.code]||("Login gagal: "+e.message);
+}
+},
 async logout(){if(auth)await signOut(auth)},
 bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()})},
 bindCheckout(){document.getElementById("checkoutForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createCheckout()})},

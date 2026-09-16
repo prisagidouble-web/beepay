@@ -7,13 +7,20 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isRole(role) {
+    function isAdmin() {
       return signedIn() &&
-        request.auth.token.role == role;
+        exists(/databases/$(database)/documents/admin_users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admin_users/$(request.auth.uid)).data.active == true;
+    }
+
+    function isRole(role) {
+      return isAdmin() &&
+        get(/databases/$(database)/documents/admin_users/$(request.auth.uid)).data.role == role;
     }
 
     function hasAnyRole(roles) {
-      return signedIn() && request.auth.token.role in roles;
+      return isAdmin() &&
+        get(/databases/$(database)/documents/admin_users/$(request.auth.uid)).data.role in roles;
     }
 
     function isSelf(uid) {
@@ -23,6 +30,15 @@ service cloud.firestore {
     // Default deny. Every collection must have an explicit rule.
     match /{document=**} {
       allow read, write: if false;
+    }
+
+
+
+    // Admin directory. Bootstrap these documents manually from Firebase Console
+    // or trusted server tooling. Clients cannot create/modify their own admin access.
+    match /admin_users/{uid} {
+      allow read: if isSelf(uid);
+      allow write: if false;
     }
 
     // User profile: user can read/update only their own non-privileged profile.

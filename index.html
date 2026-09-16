@@ -6,7 +6,17 @@
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
 <section class="hero"><h1>BeePay</h1><p>Payment processing foundation dengan payment intent dan idempotency.</p></section>
-<section class="auth-panel"><h2>Admin Authentication</h2><p id="authMessage">Belum login.</p><div class="auth-actions"><button id="loginButton">Login Admin</button><button id="logoutButton" hidden>Logout</button></div><div id="rolePanel" class="role-panel" hidden><strong id="adminName"></strong><span id="adminRole"></span></div></section>
+<section class="auth-panel">
+<h2>Admin Login</h2>
+<p id="authMessage">Silakan login menggunakan akun admin BeePay.</p>
+<form id="adminLoginForm" class="form-grid">
+<input id="adminEmail" type="email" autocomplete="username" required placeholder="Email admin">
+<input id="adminPassword" type="password" autocomplete="current-password" required placeholder="Password">
+<button id="loginButton" type="submit">Login Admin</button>
+</form>
+<div class="auth-actions"><button id="logoutButton" type="button" hidden>Logout</button></div>
+<div id="rolePanel" class="role-panel" hidden><strong id="adminName"></strong><span id="adminRole"></span></div>
+</section>
 <section class="system-status"><div class="status-card"><span class="status-label">System</span><span id="systemStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">API</span><span id="apiStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">Firebase</span><span id="firebaseStatus" class="status-value">Checking...</span></div></section>
 <section id="paymentProcessing" class="panel" hidden>
 <div class="section-heading"><h2>Payment Intent</h2><p>Membuat payment intent yang aman untuk satu order. Belum terhubung ke bank/PJP live.</p></div>
