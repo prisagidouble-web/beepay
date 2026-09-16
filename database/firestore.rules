@@ -3,446 +3,198 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // =========================================================
-    // AUTHENTICATION
-    // =========================================================
-
     function signedIn() {
       return request.auth != null;
     }
 
-    // User harus terdaftar sebagai admin aktif di admin_users/{uid}
     function isAdmin() {
       return signedIn() &&
-        exists(
-          /databases/$(database)/documents/admin_users/$(request.auth.uid)
-        ) &&
-        get(
-          /databases/$(database)/documents/admin_users/$(request.auth.uid)
-        ).data.active == true;
+        exists(/databases/$(database)/documents/admin_users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admin_users/$(request.auth.uid)).data.active == true;
     }
 
-    // Cek role admin
     function isRole(role) {
       return isAdmin() &&
-        get(
-          /databases/$(database)/documents/admin_users/$(request.auth.uid)
-        ).data.role == role;
+        get(/databases/$(database)/documents/admin_users/$(request.auth.uid)).data.role == role;
     }
 
-    // Cek apakah admin memiliki salah satu role
     function hasAnyRole(roles) {
       return isAdmin() &&
-        get(
-          /databases/$(database)/documents/admin_users/$(request.auth.uid)
-        ).data.role in roles;
+        get(/databases/$(database)/documents/admin_users/$(request.auth.uid)).data.role in roles;
     }
 
-    // Cek user sedang mengakses dokumennya sendiri
     function isSelf(uid) {
       return signedIn() && request.auth.uid == uid;
     }
 
-
-    // =========================================================
-    // DEFAULT DENY
-    // =========================================================
-
-    // Semua collection yang belum mempunyai rule khusus
-    // otomatis ditolak.
+    // Default deny. Every collection must have an explicit rule.
     match /{document=**} {
       allow read, write: if false;
     }
 
-
-    // =========================================================
-    // ADMIN USERS
-    // =========================================================
-
-    // Dokumen admin dibuat manual melalui Firebase Console
-    // atau trusted backend.
-    //
-    // Client tidak boleh membuat atau mengubah hak akses admin.
+    // Admin directory.
+    // Bootstrap these documents manually from Firebase Console
+    // or trusted server tooling. Clients cannot create/modify
+    // their own admin access.
     match /admin_users/{uid} {
-
-      // Admin dapat membaca data dirinya sendiri.
       allow read: if isSelf(uid);
-
-      // Tidak boleh membuat / mengubah / menghapus admin
-      // dari client.
       allow write: if false;
     }
 
-
-    // =========================================================
-    // USERS
-    // =========================================================
-
+    // User profile.
+    // User can read/update only their own non-privileged profile.
     match /users/{uid} {
-
-      // User dapat membaca profil sendiri.
-      //
-      // Admin tertentu dapat membaca profil user.
       allow read: if isSelf(uid) ||
-        hasAnyRole([
-          'SUPER_ADMIN',
-          'SUPPORT',
-          'EVENT_ADMIN',
-          'FINANCE',
-          'AUDITOR'
-        ]);
+        hasAnyRole(['SUPER_ADMIN', 'SUPPORT', 'EVENT_ADMIN', 'FINANCE', 'AUDITOR']);
 
-      // User dapat membuat profilnya sendiri.
       allow create: if isSelf(uid);
 
-      // User hanya boleh update profil sendiri.
-      //
-      // Role tidak boleh diubah oleh client.
-      allow update: if isSelf(uid) &&
-        request.resource.data.role == resource.data.role;
+      allow update: if isSelf(uid)
+        && request.resource.data.role == resource.data.role;
 
-      // User tidak dapat menghapus profil melalui client.
       allow delete: if false;
     }
 
-
-    // =========================================================
-    // EVENTS
-    // =========================================================
-
+    // Events.
     match /events/{eventId} {
-
-      // User yang sudah login dapat membaca event.
       allow read: if signedIn();
-
-      // Hanya SUPER_ADMIN yang dapat mengelola event.
       allow create, update, delete: if isRole('SUPER_ADMIN');
     }
-
 
     // =========================================================
     // PAYMENT INTENTS
     // =========================================================
-
-    // Payment Intent merupakan fondasi transaksi pembayaran.
     //
-    // User biasa:
-    //   - hanya boleh membuat intent untuk dirinya sendiri.
+    // Phase 21 frontend currently creates Payment Intent directly
+    // from the authenticated admin client.
     //
-    // SUPER_ADMIN / FINANCE / EVENT_ADMIN:
-    //   - boleh membuat intent untuk user lain melalui dashboard.
+    // Initial client-created status:
+    // REQUIRES_PAYMENT
     //
-    // Status awal wajib PENDING.
+    // created_by must equal the authenticated admin UID.
     //
-    // Client tidak boleh:
-    //   - mengubah status
-    //   - menghapus intent
-    //   - membuat intent langsung berstatus PAID/SUCCESS/FAILED
+    // Payment status must NOT be changed by the client.
+    // PAID/SUCCEEDED and ticket activation remain trusted-backend
+    // operations.
     match /payment_intents/{intentId} {
 
-      // -------------------------------------------------------
-      // READ
-      // -------------------------------------------------------
-
+      // Admin/authorized finance/event roles can read intents.
+      // The creator can also read the intent.
       allow read: if signedIn() &&
         (
-          resource.data.user_id == request.auth.uid ||
           hasAnyRole([
             'SUPER_ADMIN',
             'FINANCE',
             'EVENT_ADMIN',
             'AUDITOR'
-          ])
+          ]) ||
+          resource.data.created_by == request.auth.uid
         );
 
-
-      // -------------------------------------------------------
-      // CREATE
-      // -------------------------------------------------------
-
+      // Authorized admin roles may create a Payment Intent.
+      //
+      // The browser must identify the authenticated admin as
+      // created_by and the initial state must be
+      // REQUIRES_PAYMENT.
       allow create: if signedIn() &&
-        request.resource.data.status == 'PENDING' &&
-        (
-          // User membuat payment intent untuk dirinya sendiri
-          request.resource.data.user_id == request.auth.uid ||
+        hasAnyRole([
+          'SUPER_ADMIN',
+          'FINANCE',
+          'EVENT_ADMIN'
+        ]) &&
+        request.resource.data.created_by == request.auth.uid &&
+        request.resource.data.status == 'REQUIRES_PAYMENT';
 
-          // Admin tertentu dapat membuat payment intent
-          // untuk user/order lain.
-          hasAnyRole([
-            'SUPER_ADMIN',
-            'FINANCE',
-            'EVENT_ADMIN'
-          ])
-        );
-
-
-      // -------------------------------------------------------
-      // UPDATE / DELETE
-      // -------------------------------------------------------
-
-      // Payment state dikendalikan oleh trusted backend.
+      // Client cannot modify or delete a Payment Intent.
+      // Payment state changes belong to trusted backend/webhook flow.
       allow update, delete: if false;
     }
 
-
-    // =========================================================
-    // ORDERS
-    // =========================================================
-
+    // Orders.
     match /orders/{orderId} {
-
-      // User dapat membaca order miliknya.
-      //
-      // Admin tertentu dapat membaca order.
       allow read: if signedIn() &&
-        (
-          resource.data.user_id == request.auth.uid ||
-          hasAnyRole([
-            'SUPER_ADMIN',
-            'FINANCE',
-            'EVENT_ADMIN',
-            'SUPPORT',
-            'AUDITOR'
-          ])
-        );
+        (resource.data.user_id == request.auth.uid ||
+         hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'SUPPORT', 'AUDITOR']));
 
-
-      // User dapat membuat order untuk dirinya sendiri.
       allow create: if signedIn() &&
         request.resource.data.user_id == request.auth.uid;
 
-
-      // Order/payment/ticket state tidak boleh diubah
-      // langsung dari client.
       allow update, delete: if false;
     }
 
-
-    // =========================================================
-    // PAYMENT LEDGER
-    // =========================================================
-
-    // Ledger pembayaran bersifat immutable dari sisi client.
+    // Payment ledger: read only for authorized users. No client writes.
     match /payment_ledger/{ledgerId} {
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']) ||
+        (signedIn() && resource.data.user_id == request.auth.uid);
 
-      // Role tertentu dapat membaca ledger.
-      //
-      // User juga dapat membaca ledger miliknya sendiri.
-      allow read: if
-        hasAnyRole([
-          'SUPER_ADMIN',
-          'FINANCE',
-          'EVENT_ADMIN',
-          'AUDITOR'
-        ]) ||
-        (
-          signedIn() &&
-          resource.data.user_id == request.auth.uid
-        );
-
-      // Tidak ada client write.
       allow write: if false;
     }
 
-
-    // =========================================================
-    // WEBHOOK EVENTS
-    // =========================================================
-
-    // Event webhook hanya dapat dibaca role tertentu.
-    // Client tidak boleh menulis webhook.
+    // Provider/webhook events: never client-writable.
     match /webhook_events/{webhookId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'FINANCE',
-        'AUDITOR'
-      ]);
-
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'AUDITOR']);
       allow write: if false;
     }
 
-
-    // =========================================================
-    // PAYMENT VERIFICATIONS
-    // =========================================================
-
+    // Verification results: never client-writable.
     match /payment_verifications/{verificationId} {
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']) ||
+        (signedIn() && resource.data.user_id == request.auth.uid);
 
-      // Role tertentu dapat membaca hasil verifikasi.
-      //
-      // User dapat membaca hasil verifikasi miliknya.
-      allow read: if
-        hasAnyRole([
-          'SUPER_ADMIN',
-          'FINANCE',
-          'EVENT_ADMIN',
-          'AUDITOR'
-        ]) ||
-        (
-          signedIn() &&
-          resource.data.user_id == request.auth.uid
-        );
-
-      // Verification dibuat oleh trusted backend.
       allow write: if false;
     }
 
-
-    // =========================================================
-    // TICKETS
-    // =========================================================
-
+    // Tickets: client may read their own ticket.
+    // Creation/status changes are trusted backend only.
     match /tickets/{ticketId} {
-
-      // User dapat membaca tiket miliknya.
-      //
-      // Role tertentu dapat membaca tiket.
       allow read: if signedIn() &&
-        (
-          resource.data.user_id == request.auth.uid ||
-          hasAnyRole([
-            'SUPER_ADMIN',
-            'EVENT_ADMIN',
-            'SUPPORT',
-            'AUDITOR'
-          ])
-        );
+        (resource.data.user_id == request.auth.uid ||
+         hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN', 'SUPPORT', 'AUDITOR']));
 
-      // Ticket creation/status dikendalikan backend.
       allow create, update, delete: if false;
     }
 
-
-    // =========================================================
-    // RECONCILIATION
-    // =========================================================
-
+    // Reconciliation.
     match /reconciliation/{recordId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'FINANCE',
-        'EVENT_ADMIN',
-        'AUDITOR'
-      ]);
-
-      // Tidak dapat ditulis dari client.
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']);
       allow write: if false;
     }
 
-
-    // =========================================================
-    // AUDIT LOGS
-    // =========================================================
-
-    // Audit log bersifat immutable dari client.
+    // Audit logs are immutable to clients.
     match /audit_logs/{auditId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'AUDITOR',
-        'FINANCE'
-      ]);
-
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
       allow write: if false;
     }
 
-
-    // =========================================================
-    // SANDBOX RUNS
-    // =========================================================
-
-    // Sandbox terisolasi dari production.
+    // Sandbox is intentionally isolated from production.
     match /sandbox_runs/{runId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'FINANCE',
-        'EVENT_ADMIN',
-        'AUDITOR'
-      ]);
-
-      allow create: if hasAnyRole([
-        'SUPER_ADMIN',
-        'EVENT_ADMIN'
-      ]);
-
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN']);
       allow update, delete: if false;
     }
 
-
-    // =========================================================
-    // FAILURE TESTS
-    // =========================================================
-
-    // Untuk pengujian failure scenario.
+    // Failure tests are non-production and cannot affect payment/tickets.
     match /failure_tests/{testId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'AUDITOR',
-        'FINANCE'
-      ]);
-
-      allow create: if hasAnyRole([
-        'SUPER_ADMIN',
-        'EVENT_ADMIN'
-      ]);
-
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN']);
       allow update, delete: if false;
     }
 
-
-    // =========================================================
-    // HEALTH CHECKS
-    // =========================================================
-
+    // Operational health checks.
     match /health_checks/{checkId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'AUDITOR',
-        'FINANCE'
-      ]);
-
-      allow create: if hasAnyRole([
-        'SUPER_ADMIN',
-        'EVENT_ADMIN'
-      ]);
-
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN']);
       allow update, delete: if false;
     }
 
-
-    // =========================================================
-    // FINAL AUDITS
-    // =========================================================
-
-    // Final audit hanya merupakan evidence/audit record.
-    // Tidak dapat memberikan production approval.
+    // Final audit records are evidence only;
+    // they cannot grant production approval.
     match /final_audits/{auditId} {
-
-      allow read: if hasAnyRole([
-        'SUPER_ADMIN',
-        'AUDITOR',
-        'FINANCE'
-      ]);
-
-      allow create: if hasAnyRole([
-        'SUPER_ADMIN',
-        'AUDITOR'
-      ]);
-
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR']);
       allow update, delete: if false;
     }
 
-
-    // =========================================================
-    // FUTURE COLLECTIONS
-    // =========================================================
-
-    // Collection baru tetap DENY secara default sampai
-    // diberikan rule secara eksplisit.
+    // Any future collections remain denied until explicitly reviewed.
   }
 }
