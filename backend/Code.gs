@@ -9,7 +9,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "21.0.0";
+const BEEPAY_VERSION = "22.0.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -33,6 +33,9 @@ function doPost(e) {
     const body = parseRequestBody(e);
     if (body.action === "sandbox_payment") {
       return jsonResponse(processSandboxPayment(body));
+    }
+    if (body.action === "sandbox_audit") {
+      return jsonResponse(auditSandboxRuns(body));
     }
     return jsonResponse({
       success: false,
@@ -164,6 +167,7 @@ function processSandboxPayment(body) {
     });
 
     createDocument("tickets", ticketId, {
+      sandbox_run_id: str(runId),
       ticket_id: str(ticketId),
       order_id: str(orderId),
       transaction_id: str(txId),
@@ -228,6 +232,175 @@ function processSandboxPayment(body) {
       : `Sandbox payment tercatat dengan outcome ${outcome}.`,
     timestamp: now
   };
+}
+
+
+function auditSandboxRuns(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const requestedRunId = String(body.sandboxRunId || "").trim();
+  const runs = requestedRunId
+    ? [{document: firestoreGetDocument("sandbox_runs", requestedRunId), id: requestedRunId}]
+    : listSandboxRuns(100);
+
+  const results = [];
+  runs.forEach(item => {
+    const run = item.document;
+    if (!run || !run.fields) {
+      results.push({sandboxRunId: item.id, status: "ERROR", reason: "Sandbox run tidak ditemukan."});
+      return;
+    }
+    const f = item.document.fields;
+    const runId = stringField(f.sandbox_run_id, item.id);
+    const outcome = stringField(f.outcome, "");
+    const stamp = runId.replace(/^SBX-/, "");
+    const txId = stringField(f.sandbox_transaction_id, `SBX-TX-${stamp}`);
+    const expectedTicketId = `TKT-${stamp}`;
+    const ticketById = firestoreGetDocument("tickets", expectedTicketId);
+    const ticketDocs = listDocumentsByField("tickets", "transaction_id", txId);
+    const ticketCount = ticketDocs.length;
+    const tx = firestoreGetDocument("transactions", txId);
+    const txStatus = tx && tx.fields ? stringField(tx.fields.status, "") : null;
+
+    let status = "PASS";
+    let reason = "";
+    if (outcome === "SUCCESS") {
+      if (!tx || !tx.fields || stringField(tx.fields.status, "") !== "PAID") {
+        status = "FAIL";
+        reason = "SUCCESS wajib memiliki transaction berstatus PAID.";
+      } else if (ticketCount !== 1) {
+        status = "FAIL";
+        reason = `SUCCESS wajib tepat 1 ticket; ditemukan ${ticketCount}.`;
+      } else if (!ticketById || !ticketById.fields ||
+                 stringField(ticketById.fields.status, "") !== "ACTIVE" ||
+                 stringField(ticketById.fields.ticket_id, "") !== expectedTicketId) {
+        status = "FAIL";
+        reason = "Ticket SUCCESS harus ACTIVE dan ID-nya sesuai run.";
+      }
+    } else if (outcome === "PENDING") {
+      if (txStatus !== "PENDING") {
+        status = "FAIL";
+        reason = "PENDING wajib memiliki transaction berstatus PENDING.";
+      } else if (ticketCount !== 0) {
+        status = "FAIL";
+        reason = "PENDING tidak boleh membuat ticket; ditemukan 1 atau lebih ticket.";
+      }
+    } else if (outcome === "FAILED") {
+      if (tx) {
+        status = "FAIL";
+        reason = "FAILED tidak boleh membuat transaction.";
+      } else if (ticketCount !== 0) {
+        status = "FAIL";
+        reason = "FAILED tidak boleh membuat ticket; ditemukan 1 atau lebih ticket.";
+      }
+    } else {
+      status = "FAIL";
+      reason = `Outcome tidak dikenal: ${outcome}`;
+    }
+
+    results.push({
+      sandboxRunId: runId,
+      outcome: outcome,
+      transactionId: txId,
+      transactionStatus: txStatus,
+      expectedTicketId: expectedTicketId,
+      ticketCount: ticketCount,
+      status: status,
+      reason: reason
+    });
+  });
+
+  const passed = results.filter(x => x.status === "PASS").length;
+  const failed = results.filter(x => x.status === "FAIL").length;
+  const errors = results.filter(x => x.status === "ERROR").length;
+  const auditId = `SBA-${Date.now()}`;
+  createDocument("audit_logs", auditId, {
+    audit_id: str(auditId),
+    action: str("SANDBOX_E2E_AUDIT"),
+    target_id: str(requestedRunId || "LATEST_100"),
+    severity: str(failed || errors ? "ERROR" : "INFO"),
+    outcome: str(failed || errors ? "FAIL" : "PASS"),
+    passed: integer(passed),
+    failed: integer(failed),
+    errors: integer(errors),
+    production: boolean(false),
+    real_bank_called: boolean(false),
+    created_by: str(authUser.uid),
+    created_at: timestamp(new Date().toISOString())
+  });
+
+  return {
+    success: true,
+    environment: "SANDBOX",
+    auditId: auditId,
+    checked: results.length,
+    passed: passed,
+    failed: failed,
+    errors: errors,
+    overall: failed || errors ? "FAIL" : "PASS",
+    results: results
+  };
+}
+
+function listSandboxRuns(limit) {
+  const url = `${DB_ROOT}:runQuery`;
+  const body = {
+    structuredQuery: {
+      from: [{collectionId: "sandbox_runs"}],
+      orderBy: [{field: {fieldPath: "created_at"}, direction: "DESCENDING"}],
+      limit: limit
+    },
+    parent: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`
+  };
+  const rows = firestoreRequest(url, "post", body);
+  return (rows || []).filter(x => x.document).map(x => ({
+    id: x.document.name.split("/").pop(),
+    document: x.document
+  }));
+}
+
+function listDocumentsByField(collection, fieldPath, value) {
+  const url = `${DB_ROOT}:runQuery`;
+  const body = {
+    structuredQuery: {
+      from: [{collectionId: collection}],
+      where: {fieldFilter: {
+        field: {fieldPath: fieldPath},
+        op: "EQUAL",
+        value: {stringValue: String(value)}
+      }}
+    },
+    parent: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`
+  };
+  const rows = firestoreRequest(url, "post", body);
+  return (rows || []).filter(x => x.document).map(x => x.document);
+}
+
+function firestoreGetDocument(collection, documentId) {
+  const url = `${DB_ROOT}/${collection}/${encodeURIComponent(documentId)}`;
+  const response = UrlFetchApp.fetch(url, {
+    method: "get",
+    headers: {Authorization: `Bearer ${ScriptApp.getOAuthToken()}`},
+    muteHttpExceptions: true
+  });
+  const code = response.getResponseCode();
+  if (code === 404) return null;
+  if (code < 200 || code >= 300) {
+    const text = response.getContentText() || "";
+    throw new Error(`Firestore API ${code}: ${text.substring(0, 500)}`);
+  }
+  return JSON.parse(response.getContentText() || "{}");
+}
+
+function stringField(fields, key, fallback) {
+  return fields && fields[key] && fields[key].stringValue != null
+    ? fields[key].stringValue
+    : fallback;
 }
 
 function verifyFirebaseIdToken(idToken) {
