@@ -5,3 +5,5 @@
 .auth-panel input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d7dbe2;border-radius:10px;background:#fff}
 .auth-panel button{cursor:pointer}
 .auth-panel .auth-actions{margin-top:10px}
+
+.audit-actions{margin-top:16px;display:grid;gap:10px}.audit-output{white-space:pre-wrap;min-height:24px}#sandboxAuditBtn{width:max-content}
