@@ -9,7 +9,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "21.1.0";
+const BEEPAY_VERSION = "21.2.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -107,7 +107,9 @@ function processSandboxAudit(body) {
     check(outcome + ": trusted sandbox", d.real_bank_called === false,
       "real_bank_called=" + d.real_bank_called);
     check(outcome + ": Run → Payment Intent", !!intentId, intentId || "missing");
-    check(outcome + ": Run → Transaction", !!txId, txId || "missing");
+    // SUCCESS/PENDING create a transaction; FAILED intentionally does not.
+    check(outcome + ": Run → Transaction", outcome === "FAILED" ? !txId || !!txId : !!txId,
+      outcome === "FAILED" ? (txId ? txId + " · transaction may be absent by design" : "not required") : (txId || "missing"));
 
     const intent = intentId ? getDocument("payment_intents", intentId) : null;
     const tx = txId ? getDocument("transactions", txId) : null;
@@ -115,9 +117,12 @@ function processSandboxAudit(body) {
     const txData = tx ? decodeFirestoreFields(tx.fields || {}) : null;
 
     check(outcome + ": Payment Intent exists", !!intentData, intentData ? "OK" : "missing");
-    check(outcome + ": Transaction exists", !!txData, txData ? "OK" : "missing");
+    check(outcome + ": Transaction exists", outcome === "FAILED" ? !txData : !!txData,
+      outcome === "FAILED" ? (txData ? "unexpected transaction exists" : "Not created for FAILED") : (txData ? "OK" : "missing"));
 
     if (outcome === "SUCCESS") {
+      check("SUCCESS: payment intent SUCCEEDED", !!intentData && intentData.status === "SUCCEEDED" && intentData.trusted === true && intentData.production === false,
+        intentData ? "status="+intentData.status+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
       check("SUCCESS: payment PAID", !!txData && txData.status === "PAID" && Number(txData.amount) === expectedAmount && txData.trusted === true && txData.production === false,
         txData ? "status="+txData.status+", amount="+txData.amount+", trusted="+txData.trusted+", production="+txData.production : "missing");
       const payments = related("payments", "transaction_id", txId).concat(related("payments", "payment_intent_id", intentId));
@@ -129,12 +134,16 @@ function processSandboxAudit(body) {
       check("SUCCESS: ticket ACTIVE", !!active && active.data.activated_by_backend === true && active.data.activation_source === "SANDBOX_TRUSTED_BACKEND" && active.data.production === false,
         active ? "ticket="+(active.data.ticket_id || active.id)+", status="+active.data.status : "ACTIVE ticket missing");
     } else if (outcome === "PENDING") {
+      check("PENDING: payment intent PROCESSING", !!intentData && intentData.status === "PROCESSING" && intentData.trusted === true && intentData.production === false,
+        intentData ? "status="+intentData.status+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
       check("PENDING: payment PENDING", !!txData && txData.status === "PENDING" && Number(txData.amount) === expectedAmount && txData.trusted === true && txData.production === false,
         txData ? "status="+txData.status+", amount="+txData.amount : "missing");
       const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
       check("PENDING: no ACTIVE ticket", !tickets.some(function(t){return t.data.status === "ACTIVE" && t.data.active === true;}),
         tickets.length ? tickets.length + " related ticket(s)" : "No related ticket");
     } else {
+      check("FAILED: payment intent FAILED", !!intentData && intentData.status === "FAILED" && Number(intentData.amount) === expectedAmount && intentData.trusted === true && intentData.production === false,
+        intentData ? "status="+intentData.status+", amount="+intentData.amount+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
       check("FAILED: payment FAILED", !!intentData && intentData.status === "FAILED" && intentData.trusted === true && intentData.production === false,
         intentData ? "intent status="+intentData.status : "missing");
       const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
