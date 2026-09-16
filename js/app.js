@@ -4,8 +4,8 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"20.0.0",
-async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
+version:"22.0.0",
+async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
 bindAuth(){
@@ -72,7 +72,7 @@ bindResult(){document.getElementById("resultForm")?.addEventListener("submit",as
 bindTicket(){document.getElementById("ticketForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createTicketRecord()})},
 bindReconciliation(){document.getElementById("reconForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.loadReconciliation()})},
 bindAudit(){document.getElementById("auditForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createAuditEvent()})},
-bindSandbox(){document.getElementById("sandboxForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runSandbox()})},
+bindSandbox(){document.getElementById("sandboxForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runSandbox()})},bindSandboxAudit(){document.getElementById("sandboxAuditBtn")?.addEventListener("click",async()=>{await this.runSandboxAudit()})},
 bindFailureTests(){document.getElementById("failureTestForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runFailureTest()})},
 bindHealth(){document.getElementById("healthCheckForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.recordHealthCheck()})},
 bindFinalAudit(){document.getElementById("auditChecklistForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.recordFinalAudit()})},
@@ -90,18 +90,13 @@ m.textContent="Memproses sandbox melalui trusted backend...";
 try{
   const idToken=await currentUser.getIdToken(true);
   const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_payment",idToken,eventId,userId,amount,outcome})});
-  const raw=await response.json();
-  // Support both the current GAS response shape and an older wrapped shape.
-  const result=(raw&&raw.data&&typeof raw.data==="object")?{...raw,...raw.data}:raw;
-  if(!result||result.success!==true)throw new Error(result?.error||result?.message||"Sandbox gagal.");
-  const runId=result.sandboxRunId||result.sandbox_run_id||result.runId||"-";
-  const ticketId=result.ticketId||result.ticket_id||null;
-  const message=result.message||`Sandbox payment ${result.outcome||"tercatat"}.`;
+  const result=await response.json();
+  if(!result.success)throw new Error(result.error||"Sandbox gagal.");
   document.getElementById("sandboxForm").reset();
-  m.textContent=`${message} Run: ${runId} · Ticket: ${ticketId||"-"}`;
+  m.textContent=`${result.message} Run: ${result.sandboxRunId} · Ticket: ${result.ticketId||"-"}`;
   await this.loadSandboxRuns();
   await this.loadTickets();
-}catch(e){console.error(e);m.textContent="Sandbox gagal: "+e.message}},async loadSandboxRuns(){const list=document.getElementById("sandboxList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"sandbox_runs"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada sandbox run.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.sandbox_run_id||"-")}</h3><div class="meta">Event: ${this.escape(x.event_id||"-")} · User: ${this.escape(x.user_id||"-")} · ${this.escape(String(x.amount||0))} IDR</div></div><span class="status">${this.escape(x.outcome||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Sandbox ledger belum dapat dibaca.</div>'}},
+}catch(e){console.error(e);m.textContent="Sandbox gagal: "+e.message}},async runSandboxAudit(){const m=document.getElementById("sandboxAuditMessage");if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}m.textContent="Memeriksa setiap sandbox run...";try{const idToken=await currentUser.getIdToken(true);const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_audit",idToken})});const result=await response.json();if(!result.success)throw new Error(result.error||"Audit gagal.");const detail=(result.results||[]).map(x=>`${x.sandboxRunId}: ${x.outcome} → ${x.ticketCount} ticket → ${x.status}${x.reason?" — "+x.reason:""}`).join("\n");m.textContent=`Audit ${result.overall}: ${result.checked} run diperiksa | PASS ${result.passed} | FAIL ${result.failed} | ERROR ${result.errors}.\n${detail}`;}catch(e){console.error(e);m.textContent="Sandbox audit gagal: "+e.message}},async loadSandboxRuns(){const list=document.getElementById("sandboxList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"sandbox_runs"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada sandbox run.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.sandbox_run_id||"-")}</h3><div class="meta">Event: ${this.escape(x.event_id||"-")} · User: ${this.escape(x.user_id||"-")} · ${this.escape(String(x.amount||0))} IDR</div></div><span class="status">${this.escape(x.outcome||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Sandbox ledger belum dapat dibaca.</div>'}},
 async createAuditEvent(){const m=document.getElementById("auditMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}
 const action=document.getElementById("auditAction").value.trim(),target=document.getElementById("auditTarget").value.trim(),severity=document.getElementById("auditSeverity").value;if(!action||!target){m.textContent="Action dan target wajib diisi.";return}
 const id=`AUD-${Date.now()}`,data={audit_id:id,actor_uid:currentUser.uid,action,target_id:target,severity,source:"admin-ui",trusted:false,created_at:serverTimestamp()};
