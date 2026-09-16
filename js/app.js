@@ -90,10 +90,15 @@ m.textContent="Memproses sandbox melalui trusted backend...";
 try{
   const idToken=await currentUser.getIdToken(true);
   const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_payment",idToken,eventId,userId,amount,outcome})});
-  const result=await response.json();
-  if(!result.success)throw new Error(result.error||"Sandbox gagal.");
+  const raw=await response.json();
+  // Support both the current GAS response shape and an older wrapped shape.
+  const result=(raw&&raw.data&&typeof raw.data==="object")?{...raw,...raw.data}:raw;
+  if(!result||result.success!==true)throw new Error(result?.error||result?.message||"Sandbox gagal.");
+  const runId=result.sandboxRunId||result.sandbox_run_id||result.runId||"-";
+  const ticketId=result.ticketId||result.ticket_id||null;
+  const message=result.message||`Sandbox payment ${result.outcome||"tercatat"}.`;
   document.getElementById("sandboxForm").reset();
-  m.textContent=`${result.message} Run: ${result.sandboxRunId} · Ticket: ${result.ticketId||"-"}`;
+  m.textContent=`${message} Run: ${runId} · Ticket: ${ticketId||"-"}`;
   await this.loadSandboxRuns();
   await this.loadTickets();
 }catch(e){console.error(e);m.textContent="Sandbox gagal: "+e.message}},async loadSandboxRuns(){const list=document.getElementById("sandboxList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"sandbox_runs"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada sandbox run.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.sandbox_run_id||"-")}</h3><div class="meta">Event: ${this.escape(x.event_id||"-")} · User: ${this.escape(x.user_id||"-")} · ${this.escape(String(x.amount||0))} IDR</div></div><span class="status">${this.escape(x.outcome||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Sandbox ledger belum dapat dibaca.</div>'}},
