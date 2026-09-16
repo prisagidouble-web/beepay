@@ -1,58 +1,8 @@
-/**
- * BeePay Backend - Phase 21
- * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
- *
- * IMPORTANT:
- * - This endpoint is SANDBOX ONLY.
- * - It never calls a real bank/PJP.
- * - The browser sends a Firebase ID token.
- * - GAS verifies the Firebase token and checks admin_users/{uid}.
- * - GAS writes trusted payment/ticket records using its Google OAuth identity.
- */
-const BEEPAY_VERSION = "22.0.0";
-const FIREBASE_PROJECT_ID = "beepay-2c2dc";
-const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
-const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
-
-const BEEPAY_ROLES = ["SUPER_ADMIN","ADMIN","FINANCE","EVENT_ADMIN","VIEWER"];
-
-function doGet() {
-  return jsonResponse({
-    success: true,
-    service: "BeePay API",
-    version: BEEPAY_VERSION,
-    status: "ONLINE",
-    environment: "SANDBOX",
-    liveBankCalled: false,
-    timestamp: new Date().toISOString()
-  });
-}
-
-function doPost(e) {
-  try {
-    const body = parseRequestBody(e);
-    if (body.action === "sandbox_payment") {
-      return jsonResponse(processSandboxPayment(body));
-    }
-    if (body.action === "sandbox_audit") {
-      return jsonResponse(auditSandboxRuns(body));
-    }
-    return jsonResponse({
-      success: false,
-      error: "Unknown action",
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    return jsonResponse({
-      success: false,
-      error: String(err.message || err),
-      timestamp: new Date().toISOString()
-    });
+function processSandboxAudit(body) {
+  if (!body.idToken) {
+    throw new Error("Firebase ID token wajib.");
   }
-}
 
-function processSandboxPayment(body) {
-  if (!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser = verifyFirebaseIdToken(body.idToken);
   const admin = getAdminProfile(authUser.uid);
 
@@ -60,419 +10,436 @@ function processSandboxPayment(body) {
     throw new Error("Akun tidak memiliki akses admin BeePay.");
   }
 
-  const outcome = String(body.outcome || "SUCCESS").toUpperCase();
-  if (!["SUCCESS","PENDING","FAILED"].includes(outcome)) {
-    throw new Error("Outcome sandbox tidak valid.");
+  const expectedAmount = Number(body.amount || 75000);
+
+  if (!Number.isSafeInteger(expectedAmount) || expectedAmount !== 75000) {
+    throw new Error(
+      "Audit Sandbox E2E menggunakan nominal pengujian 75000 IDR."
+    );
   }
 
-  const eventId = requiredText(body.eventId, "Event ID");
-  const userId = requiredText(body.userId, "User ID");
-  const amount = Number(body.amount);
-  if (!Number.isSafeInteger(amount) || amount < 1) {
-    throw new Error("Amount harus berupa bilangan IDR yang valid.");
-  }
+  /*
+   * READ ONLY
+   *
+   * Audit tidak membuat:
+   * - sandbox_runs
+   * - payment_intents
+   * - transactions
+   * - payments
+   * - tickets
+   *
+   * Audit hanya membaca Firestore.
+   */
 
-  const now = new Date().toISOString();
-  const stamp = Date.now();
-  const runId = `SBX-${stamp}`;
-  const txId = `SBX-TX-${stamp}`;
-  const intentId = `SBX-PI-${stamp}`;
-  const orderId = `SBX-ORD-${stamp}`;
-  const ref = `SANDBOX-${stamp}`;
-  const ticketId = `TKT-${stamp}`;
+  const runs = listDocuments("sandbox_runs", 100)
+    .map(function(doc) {
+      return {
+        id: doc.name.split("/").pop(),
+        data: decodeFirestoreFields(doc.fields || {})
+      };
+    })
+    .filter(function(item) {
+      return (
+        Number(item.data.amount) === expectedAmount &&
+        item.data.production === false
+      );
+    })
+    .sort(function(a, b) {
+      return (
+        new Date(b.data.created_at || 0).getTime() -
+        new Date(a.data.created_at || 0).getTime()
+      );
+    });
 
-  // Always record the sandbox run first.
-  createDocument("sandbox_runs", runId, {
-    sandbox_run_id: str(runId),
-    sandbox_transaction_id: str(txId),
-    sandbox_payment_intent_id: str(intentId),
-    sandbox_reference: str(ref),
-    event_id: str(eventId),
-    user_id: str(userId),
-    amount: integer(amount),
-    currency: str("IDR"),
-    outcome: str(outcome),
-    production: boolean(false),
-    real_bank_called: boolean(false),
-    created_by: str(authUser.uid),
-    created_at: timestamp(now)
+  const outcomes = ["SUCCESS", "PENDING", "FAILED"];
+  const selected = {};
+
+  outcomes.forEach(function(outcome) {
+    selected[outcome] =
+      runs.find(function(item) {
+        return (
+          String(item.data.outcome || "").toUpperCase() === outcome
+        );
+      }) || null;
   });
 
-  // Create the payment intent in a trusted state.
-  createDocument("payment_intents", intentId, {
-    payment_intent_id: str(intentId),
-    order_id: str(orderId),
-    event_id: str(eventId),
-    user_id: str(userId),
-    amount: integer(amount),
-    currency: str("IDR"),
-    channel: str("SANDBOX"),
-    idempotency_key: str(`SANDBOX:${ref}`),
-    status: str(outcome === "SUCCESS" ? "SUCCEEDED" : outcome === "PENDING" ? "PROCESSING" : "FAILED"),
-    trusted: boolean(true),
-    production: boolean(false),
-    created_by_backend: boolean(true),
-    created_at: timestamp(now),
-    updated_at: timestamp(now)
-  });
+  const checks = [];
 
-  if (outcome === "SUCCESS") {
-    createDocument("transactions", txId, {
-      transaction_id: str(txId),
-      order_id: str(orderId),
-      payment_intent_id: str(intentId),
-      event_id: str(eventId),
-      user_id: str(userId),
-      amount: integer(amount),
-      currency: str("IDR"),
-      status: str("PAID"),
-      channel: str("SANDBOX"),
-      provider_reference: str(ref),
-      trusted: boolean(true),
-      production: boolean(false),
-      created_at: timestamp(now),
-      updated_at: timestamp(now)
-    });
-
-    createDocument("payments", `PAY-${stamp}`, {
-      payment_id: str(`PAY-${stamp}`),
-      payment_intent_id: str(intentId),
-      transaction_id: str(txId),
-      event_id: str(eventId),
-      user_id: str(userId),
-      amount: integer(amount),
-      currency: str("IDR"),
-      status: str("PAID"),
-      provider: str("SANDBOX"),
-      provider_reference: str(ref),
-      trusted: boolean(true),
-      production: boolean(false),
-      verified_by_backend: boolean(true),
-      created_at: timestamp(now)
-    });
-
-    createDocument("payment_ledger", `LED-${stamp}`, {
-      ledger_id: str(`LED-${stamp}`),
-      transaction_id: str(txId),
-      payment_intent_id: str(intentId),
-      event_id: str(eventId),
-      user_id: str(userId),
-      amount: integer(amount),
-      currency: str("IDR"),
-      status: str("PAID"),
-      source: str("SANDBOX"),
-      provider_reference: str(ref),
-      production: boolean(false),
-      created_at: timestamp(now)
-    });
-
-    createDocument("tickets", ticketId, {
-      sandbox_run_id: str(runId),
-      ticket_id: str(ticketId),
-      order_id: str(orderId),
-      transaction_id: str(txId),
-      payment_intent_id: str(intentId),
-      user_id: str(userId),
-      event_id: str(eventId),
-      status: str("ACTIVE"),
-      active: boolean(true),
-      activated_by_backend: boolean(true),
-      activation_source: str("SANDBOX_TRUSTED_BACKEND"),
-      production: boolean(false),
-      created_at: timestamp(now),
-      activated_at: timestamp(now)
-    });
-  } else if (outcome === "PENDING") {
-    createDocument("transactions", txId, {
-      transaction_id: str(txId),
-      order_id: str(orderId),
-      payment_intent_id: str(intentId),
-      event_id: str(eventId),
-      user_id: str(userId),
-      amount: integer(amount),
-      currency: str("IDR"),
-      status: str("PENDING"),
-      channel: str("SANDBOX"),
-      provider_reference: str(ref),
-      trusted: boolean(true),
-      production: boolean(false),
-      created_at: timestamp(now),
-      updated_at: timestamp(now)
+  function addCheck(name, pass, detail) {
+    checks.push({
+      name: name,
+      pass: Boolean(pass),
+      detail: String(detail || "")
     });
   }
 
-  createDocument("audit_logs", `AUD-${stamp}`, {
-    audit_id: str(`AUD-${stamp}`),
-    action: str("SANDBOX_PAYMENT"),
-    target_id: str(runId),
-    severity: str("INFO"),
-    outcome: str(outcome),
-    event_id: str(eventId),
-    user_id: str(userId),
-    amount: integer(amount),
-    production: boolean(false),
-    real_bank_called: boolean(false),
-    created_by: str(authUser.uid),
-    created_at: timestamp(now)
-  });
+  outcomes.forEach(function(outcome) {
 
-  return {
-    success: true,
-    environment: "SANDBOX",
-    liveBankCalled: false,
-    outcome: outcome,
-    sandboxRunId: runId,
-    paymentIntentId: intentId,
-    transactionId: txId,
-    orderId: orderId,
-    ticketId: outcome === "SUCCESS" ? ticketId : null,
-    ticketStatus: outcome === "SUCCESS" ? "ACTIVE" : null,
-    message: outcome === "SUCCESS"
-      ? "Sandbox payment berhasil. Payment PAID dan ticket ACTIVE dibuat oleh trusted backend."
-      : `Sandbox payment tercatat dengan outcome ${outcome}.`,
-    timestamp: now
-  };
-}
+    const run = selected[outcome];
 
+    addCheck(
+      outcome + ": sandbox run",
+      Boolean(run),
+      run
+        ? run.id +
+          " · " +
+          run.data.amount +
+          " IDR · production=" +
+          run.data.production
+        : "Run " +
+          outcome +
+          " dengan nominal " +
+          expectedAmount +
+          " IDR tidak ditemukan."
+    );
 
-function auditSandboxRuns(body) {
-  if (!body.idToken) throw new Error("Firebase ID token wajib.");
-  const authUser = verifyFirebaseIdToken(body.idToken);
-  const admin = getAdminProfile(authUser.uid);
-  if (!admin || admin.active !== true) {
-    throw new Error("Akun tidak memiliki akses admin BeePay.");
-  }
+    if (!run) return;
 
-  const requestedRunId = String(body.sandboxRunId || "").trim();
-  const runs = requestedRunId
-    ? [{document: firestoreGetDocument("sandbox_runs", requestedRunId), id: requestedRunId}]
-    : listSandboxRuns(100);
+    const d = run.data;
 
-  const results = [];
-  runs.forEach(item => {
-    const run = item.document;
-    if (!run || !run.fields) {
-      results.push({sandboxRunId: item.id, status: "ERROR", reason: "Sandbox run tidak ditemukan."});
-      return;
-    }
-    const f = item.document.fields;
-    const runId = stringField(f.sandbox_run_id, item.id);
-    const outcome = stringField(f.outcome, "");
-    const stamp = runId.replace(/^SBX-/, "");
-    const txId = stringField(f.sandbox_transaction_id, `SBX-TX-${stamp}`);
-    const expectedTicketId = `TKT-${stamp}`;
-    const ticketById = firestoreGetDocument("tickets", expectedTicketId);
-    const ticketDocs = listDocumentsByField("tickets", "transaction_id", txId);
-    const ticketCount = ticketDocs.length;
-    const tx = firestoreGetDocument("transactions", txId);
-    const txStatus = tx && tx.fields ? stringField(tx.fields.status, "") : null;
+    /*
+     * Sandbox harus:
+     * production = false
+     * real_bank_called = false
+     */
+    addCheck(
+      outcome + ": trusted sandbox",
+      d.production === false &&
+        d.real_bank_called === false,
+      "production=" +
+        d.production +
+        ", real_bank_called=" +
+        d.real_bank_called
+    );
 
-    let status = "PASS";
-    let reason = "";
+    const intentId = String(
+      d.sandbox_payment_intent_id || ""
+    );
+
+    const txId = String(
+      d.sandbox_transaction_id || ""
+    );
+
+    addCheck(
+      outcome + ": Run → Payment Intent",
+      Boolean(intentId),
+      intentId || "sandbox_payment_intent_id tidak ditemukan."
+    );
+
+    addCheck(
+      outcome + ": Run → Transaction",
+      Boolean(txId),
+      txId || "sandbox_transaction_id tidak ditemukan."
+    );
+
+    const intent = intentId
+      ? getDocument("payment_intents", intentId)
+      : null;
+
+    const tx = txId
+      ? getDocument("transactions", txId)
+      : null;
+
+    const intentData = intent
+      ? decodeFirestoreFields(intent.fields || {})
+      : null;
+
+    const txData = tx
+      ? decodeFirestoreFields(tx.fields || {})
+      : null;
+
+    /*
+     * ==========================
+     * SUCCESS
+     * ==========================
+     */
     if (outcome === "SUCCESS") {
-      if (!tx || !tx.fields || stringField(tx.fields.status, "") !== "PAID") {
-        status = "FAIL";
-        reason = "SUCCESS wajib memiliki transaction berstatus PAID.";
-      } else if (ticketCount !== 1) {
-        status = "FAIL";
-        reason = `SUCCESS wajib tepat 1 ticket; ditemukan ${ticketCount}.`;
-      } else if (!ticketById || !ticketById.fields ||
-                 stringField(ticketById.fields.status, "") !== "ACTIVE" ||
-                 stringField(ticketById.fields.ticket_id, "") !== expectedTicketId) {
-        status = "FAIL";
-        reason = "Ticket SUCCESS harus ACTIVE dan ID-nya sesuai run.";
-      }
+
+      addCheck(
+        "SUCCESS: payment intent",
+        Boolean(intentData) &&
+          intentData.status === "SUCCEEDED" &&
+          intentData.trusted === true &&
+          intentData.production === false,
+        intentData
+          ? "status=" +
+              intentData.status +
+              ", trusted=" +
+              intentData.trusted +
+              ", production=" +
+              intentData.production
+          : "Payment intent tidak ditemukan."
+      );
+
+      addCheck(
+        "SUCCESS: transaction PAID",
+        Boolean(txData) &&
+          txData.status === "PAID" &&
+          Number(txData.amount) === expectedAmount &&
+          txData.trusted === true &&
+          txData.production === false,
+        txData
+          ? "status=" +
+              txData.status +
+              ", amount=" +
+              txData.amount +
+              ", trusted=" +
+              txData.trusted +
+              ", production=" +
+              txData.production
+          : "Transaction tidak ditemukan."
+      );
+
+      const payments = listDocuments("payments", 100)
+        .map(function(doc) {
+          return decodeFirestoreFields(doc.fields || {});
+        })
+        .filter(function(payment) {
+          return (
+            payment.payment_intent_id === intentId ||
+            payment.transaction_id === txId
+          );
+        });
+
+      const payment = payments[0] || null;
+
+      addCheck(
+        "SUCCESS: payment PAID",
+        Boolean(payment) &&
+          payment.status === "PAID" &&
+          Number(payment.amount) === expectedAmount &&
+          payment.trusted === true &&
+          payment.production === false,
+        payment
+          ? "status=" +
+              payment.status +
+              ", amount=" +
+              payment.amount +
+              ", trusted=" +
+              payment.trusted +
+              ", production=" +
+              payment.production
+          : "Payment record tidak ditemukan."
+      );
+
+      const tickets = listDocuments("tickets", 100)
+        .map(function(doc) {
+          return decodeFirestoreFields(doc.fields || {});
+        })
+        .filter(function(ticket) {
+          return (
+            ticket.transaction_id === txId ||
+            ticket.payment_intent_id === intentId
+          );
+        });
+
+      const ticket =
+        tickets.find(function(item) {
+          return (
+            item.status === "ACTIVE" &&
+            item.active === true
+          );
+        }) || null;
+
+      addCheck(
+        "SUCCESS: ticket ACTIVE",
+        Boolean(ticket) &&
+          ticket.activated_by_backend === true &&
+          ticket.activation_source ===
+            "SANDBOX_TRUSTED_BACKEND" &&
+          ticket.production === false,
+        ticket
+          ? "ticket=" +
+              ticket.ticket_id +
+              ", status=" +
+              ticket.status +
+              ", active=" +
+              ticket.active
+          : "Ticket ACTIVE tidak ditemukan."
+      );
+
+    /*
+     * ==========================
+     * PENDING
+     * ==========================
+     */
     } else if (outcome === "PENDING") {
-      if (txStatus !== "PENDING") {
-        status = "FAIL";
-        reason = "PENDING wajib memiliki transaction berstatus PENDING.";
-      } else if (ticketCount !== 0) {
-        status = "FAIL";
-        reason = "PENDING tidak boleh membuat ticket; ditemukan 1 atau lebih ticket.";
-      }
-    } else if (outcome === "FAILED") {
-      if (tx) {
-        status = "FAIL";
-        reason = "FAILED tidak boleh membuat transaction.";
-      } else if (ticketCount !== 0) {
-        status = "FAIL";
-        reason = "FAILED tidak boleh membuat ticket; ditemukan 1 atau lebih ticket.";
-      }
+
+      addCheck(
+        "PENDING: payment intent",
+        Boolean(intentData) &&
+          intentData.status === "PROCESSING" &&
+          intentData.trusted === true &&
+          intentData.production === false,
+        intentData
+          ? "status=" +
+              intentData.status +
+              ", trusted=" +
+              intentData.trusted +
+              ", production=" +
+              intentData.production
+          : "Payment intent tidak ditemukan."
+      );
+
+      addCheck(
+        "PENDING: transaction PENDING",
+        Boolean(txData) &&
+          txData.status === "PENDING" &&
+          Number(txData.amount) === expectedAmount &&
+          txData.trusted === true &&
+          txData.production === false,
+        txData
+          ? "status=" +
+              txData.status +
+              ", amount=" +
+              txData.amount +
+              ", trusted=" +
+              txData.trusted +
+              ", production=" +
+              txData.production
+          : "Transaction PENDING tidak ditemukan."
+      );
+
+      const pendingTickets = listDocuments("tickets", 100)
+        .map(function(doc) {
+          return decodeFirestoreFields(doc.fields || {});
+        })
+        .filter(function(ticket) {
+          return (
+            ticket.transaction_id === txId ||
+            ticket.payment_intent_id === intentId
+          );
+        });
+
+      addCheck(
+        "PENDING: no ACTIVE ticket",
+        !pendingTickets.some(function(ticket) {
+          return (
+            ticket.status === "ACTIVE" &&
+            ticket.active === true
+          );
+        }),
+        pendingTickets.length
+          ? pendingTickets.length +
+              " ticket terkait ditemukan; tidak boleh ada ACTIVE."
+          : "Tidak ada ticket terkait."
+      );
+
+    /*
+     * ==========================
+     * FAILED
+     * ==========================
+     */
     } else {
-      status = "FAIL";
-      reason = `Outcome tidak dikenal: ${outcome}`;
+
+      addCheck(
+        "FAILED: payment intent",
+        Boolean(intentData) &&
+          intentData.status === "FAILED" &&
+          intentData.trusted === true &&
+          intentData.production === false,
+        intentData
+          ? "status=" +
+              intentData.status +
+              ", trusted=" +
+              intentData.trusted +
+              ", production=" +
+              intentData.production
+          : "Payment intent FAILED tidak ditemukan."
+      );
+
+      /*
+       * FAILED harus tidak mempunyai
+       * transaction PAID dan tidak boleh
+       * membuat ticket ACTIVE.
+       */
+
+      const failedTickets = listDocuments("tickets", 100)
+        .map(function(doc) {
+          return decodeFirestoreFields(doc.fields || {});
+        })
+        .filter(function(ticket) {
+          return (
+            ticket.transaction_id === txId ||
+            ticket.payment_intent_id === intentId
+          );
+        });
+
+      addCheck(
+        "FAILED: no ACTIVE ticket",
+        !failedTickets.some(function(ticket) {
+          return (
+            ticket.status === "ACTIVE" &&
+            ticket.active === true
+          );
+        }),
+        failedTickets.length
+          ? failedTickets.length +
+              " ticket terkait ditemukan; tidak boleh ada ACTIVE."
+          : "Tidak ada ticket terkait."
+      );
     }
+  });
 
-    results.push({
-      sandboxRunId: runId,
-      outcome: outcome,
-      transactionId: txId,
-      transactionStatus: txStatus,
-      expectedTicketId: expectedTicketId,
-      ticketCount: ticketCount,
-      status: status,
-      reason: reason
+  const passCount = checks.filter(function(item) {
+    return item.pass;
+  }).length;
+
+  const failCount =
+    checks.length - passCount;
+
+  const success =
+    failCount === 0 &&
+    outcomes.every(function(outcome) {
+      return Boolean(selected[outcome]);
     });
-  });
-
-  const passed = results.filter(x => x.status === "PASS").length;
-  const failed = results.filter(x => x.status === "FAIL").length;
-  const errors = results.filter(x => x.status === "ERROR").length;
-  const auditId = `SBA-${Date.now()}`;
-  createDocument("audit_logs", auditId, {
-    audit_id: str(auditId),
-    action: str("SANDBOX_E2E_AUDIT"),
-    target_id: str(requestedRunId || "LATEST_100"),
-    severity: str(failed || errors ? "ERROR" : "INFO"),
-    outcome: str(failed || errors ? "FAIL" : "PASS"),
-    passed: integer(passed),
-    failed: integer(failed),
-    errors: integer(errors),
-    production: boolean(false),
-    real_bank_called: boolean(false),
-    created_by: str(authUser.uid),
-    created_at: timestamp(new Date().toISOString())
-  });
 
   return {
-    success: true,
+    success: success,
+
     environment: "SANDBOX",
-    auditId: auditId,
-    checked: results.length,
-    passed: passed,
-    failed: failed,
-    errors: errors,
-    overall: failed || errors ? "FAIL" : "PASS",
-    results: results
+
+    readOnly: true,
+
+    production: false,
+
+    realBankCalled: false,
+
+    amount: expectedAmount,
+
+    summary: success
+      ? "Sandbox audit berhasil. SUCCESS, PENDING, dan FAILED konsisten dengan trusted backend."
+      : "Sandbox audit menemukan pemeriksaan yang belum sesuai.",
+
+    passCount: passCount,
+
+    failCount: failCount,
+
+    checks: checks,
+
+    runs: outcomes.map(function(outcome) {
+
+      if (!selected[outcome]) {
+        return {
+          outcome: outcome,
+          runId: null,
+          transactionId: null,
+          paymentIntentId: null
+        };
+      }
+
+      return {
+        outcome: outcome,
+        runId: selected[outcome].id,
+        transactionId:
+          selected[outcome].data
+            .sandbox_transaction_id || null,
+        paymentIntentId:
+          selected[outcome].data
+            .sandbox_payment_intent_id || null
+      };
+    }),
+
+    timestamp: new Date().toISOString()
   };
-}
-
-function listSandboxRuns(limit) {
-  const url = `${DB_ROOT}:runQuery`;
-  const body = {
-    structuredQuery: {
-      from: [{collectionId: "sandbox_runs"}],
-      orderBy: [{field: {fieldPath: "created_at"}, direction: "DESCENDING"}],
-      limit: limit
-    },
-    parent: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`
-  };
-  const rows = firestoreRequest(url, "post", body);
-  return (rows || []).filter(x => x.document).map(x => ({
-    id: x.document.name.split("/").pop(),
-    document: x.document
-  }));
-}
-
-function listDocumentsByField(collection, fieldPath, value) {
-  const url = `${DB_ROOT}:runQuery`;
-  const body = {
-    structuredQuery: {
-      from: [{collectionId: collection}],
-      where: {fieldFilter: {
-        field: {fieldPath: fieldPath},
-        op: "EQUAL",
-        value: {stringValue: String(value)}
-      }}
-    },
-    parent: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`
-  };
-  const rows = firestoreRequest(url, "post", body);
-  return (rows || []).filter(x => x.document).map(x => x.document);
-}
-
-function firestoreGetDocument(collection, documentId) {
-  const url = `${DB_ROOT}/${collection}/${encodeURIComponent(documentId)}`;
-  const response = UrlFetchApp.fetch(url, {
-    method: "get",
-    headers: {Authorization: `Bearer ${ScriptApp.getOAuthToken()}`},
-    muteHttpExceptions: true
-  });
-  const code = response.getResponseCode();
-  if (code === 404) return null;
-  if (code < 200 || code >= 300) {
-    const text = response.getContentText() || "";
-    throw new Error(`Firestore API ${code}: ${text.substring(0, 500)}`);
-  }
-  return JSON.parse(response.getContentText() || "{}");
-}
-
-function stringField(fields, key, fallback) {
-  return fields && fields[key] && fields[key].stringValue != null
-    ? fields[key].stringValue
-    : fallback;
-}
-
-function verifyFirebaseIdToken(idToken) {
-  const url = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`;
-  const response = UrlFetchApp.fetch(url, {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify({idToken: idToken}),
-    muteHttpExceptions: true
-  });
-  const code = response.getResponseCode();
-  const data = JSON.parse(response.getContentText() || "{}");
-  if (code < 200 || code >= 300 || !data.users || !data.users.length) {
-    throw new Error("Firebase ID token tidak valid atau sudah kedaluwarsa.");
-  }
-  const u = data.users[0];
-  return {uid: u.localId, email: u.email || ""};
-}
-
-function getAdminProfile(uid) {
-  const url = `${DB_ROOT}/admin_users/${encodeURIComponent(uid)}`;
-  const data = firestoreRequest(url, "get");
-  if (!data || !data.fields) return null;
-  const fields = data.fields;
-  return {
-    active: fields.active ? fields.active.booleanValue === true : false,
-    role: fields.role ? fields.role.stringValue : "",
-    name: fields.name ? fields.name.stringValue : "",
-    email: fields.email ? fields.email.stringValue : ""
-  };
-}
-
-function createDocument(collection, documentId, fields) {
-  const url = `${DB_ROOT}/${collection}?documentId=${encodeURIComponent(documentId)}`;
-  return firestoreRequest(url, "post", {fields: fields});
-}
-
-function firestoreRequest(url, method, body) {
-  const options = {
-    method: method,
-    contentType: "application/json",
-    headers: {Authorization: `Bearer ${ScriptApp.getOAuthToken()}`},
-    muteHttpExceptions: true
-  };
-  if (body) options.payload = JSON.stringify(body);
-  const response = UrlFetchApp.fetch(url, options);
-  const code = response.getResponseCode();
-  const text = response.getContentText() || "{}";
-  if (code < 200 || code >= 300) {
-    throw new Error(`Firestore API ${code}: ${text.substring(0, 500)}`);
-  }
-  return JSON.parse(text);
-}
-
-function requiredText(value, label) {
-  const v = String(value || "").trim();
-  if (!v) throw new Error(`${label} wajib diisi.`);
-  return v;
-}
-
-function str(value) { return {stringValue: String(value)}; }
-function integer(value) { return {integerValue: String(value)}; }
-function boolean(value) { return {booleanValue: Boolean(value)}; }
-function timestamp(value) { return {timestampValue: value}; }
-
-function parseRequestBody(e) {
-  if (!e || !e.postData || !e.postData.contents) return {};
-  try { return JSON.parse(e.postData.contents); }
-  catch (_) { throw new Error("Invalid JSON body"); }
-}
-
-function jsonResponse(data) {
-  return ContentService.createTextOutput(JSON.stringify(data))
-    .setMimeType(ContentService.MimeType.JSON);
 }
