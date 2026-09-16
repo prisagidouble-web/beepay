@@ -9,7 +9,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "21.2.0";
+const BEEPAY_VERSION = "21.3.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -65,28 +65,50 @@ function processSandboxAudit(body) {
     throw new Error("Akun tidak memiliki akses admin BeePay.");
   }
 
-  const expectedAmount = 75000;
-  const runs = listDocuments("sandbox_runs", 200)
+  /*
+   * READ-ONLY audit.
+   * Select the latest sandbox run as the batch anchor, then select the
+   * latest SUCCESS/PENDING/FAILED runs belonging to the same event, user,
+   * and amount. This prevents the audit from mixing an old 75k run with
+   * a newer 100k test batch.
+   */
+  const allRuns = listDocuments("sandbox_runs", 200)
     .filter(function(r) {
-      return Number(r.data.amount) === expectedAmount && r.data.production === false;
+      const d = r.data || {};
+      const outcome = String(d.outcome || "").toUpperCase();
+      return d.production === false && ["SUCCESS", "PENDING", "FAILED"].includes(outcome);
     })
-    .sort(function(a,b) {
+    .sort(function(a, b) {
       return new Date(b.data.created_at || 0).getTime() - new Date(a.data.created_at || 0).getTime();
     });
 
   const outcomes = ["SUCCESS", "PENDING", "FAILED"];
+  const anchor = allRuns[0] || null;
   const selected = {};
-  outcomes.forEach(function(outcome) {
-    selected[outcome] = runs.find(function(r) {
-      return String(r.data.outcome || "").toUpperCase() === outcome;
-    }) || null;
-  });
 
+  if (anchor) {
+    const anchorEventId = String(anchor.data.event_id || "");
+    const anchorUserId = String(anchor.data.user_id || "");
+    const expectedAmount = Number(anchor.data.amount);
+
+    outcomes.forEach(function(outcome) {
+      selected[outcome] = allRuns.find(function(r) {
+        const d = r.data || {};
+        return String(d.outcome || "").toUpperCase() === outcome &&
+          String(d.event_id || "") === anchorEventId &&
+          String(d.user_id || "") === anchorUserId &&
+          Number(d.amount) === expectedAmount;
+      }) || null;
+    });
+  }
+
+  const expectedAmount = anchor ? Number(anchor.data.amount) : null;
   const checks = [];
   function check(name, pass, detail) {
     checks.push({name:name, pass:Boolean(pass), detail:String(detail || "")});
   }
   function related(collection, field, value) {
+    if (!value) return [];
     return listDocuments(collection, 200).filter(function(r) {
       return String(r.data[field] || "") === String(value);
     });
@@ -94,8 +116,8 @@ function processSandboxAudit(body) {
 
   outcomes.forEach(function(outcome) {
     const run = selected[outcome];
-    check(outcome + ": run 75000 IDR", !!run,
-      run ? run.id + " · amount=" + run.data.amount + " · production=" + run.data.production : "Run tidak ditemukan");
+    check(outcome + ": run ditemukan", !!run,
+      run ? run.id + " · amount=" + run.data.amount + " · event=" + run.data.event_id + " · user=" + run.data.user_id : "Run tidak ditemukan dalam batch terbaru");
     if (!run) return;
 
     const d = run.data;
@@ -103,13 +125,14 @@ function processSandboxAudit(body) {
     const txId = String(d.sandbox_transaction_id || "");
     const ref = String(d.sandbox_reference || "");
 
+    check(outcome + ": amount sesuai batch", Number(d.amount) === expectedAmount,
+      "amount=" + d.amount + ", expected=" + expectedAmount);
     check(outcome + ": production=false", d.production === false, "production=" + d.production);
     check(outcome + ": trusted sandbox", d.real_bank_called === false,
       "real_bank_called=" + d.real_bank_called);
     check(outcome + ": Run → Payment Intent", !!intentId, intentId || "missing");
-    // SUCCESS/PENDING create a transaction; FAILED intentionally does not.
-    check(outcome + ": Run → Transaction", outcome === "FAILED" ? !txId || !!txId : !!txId,
-      outcome === "FAILED" ? (txId ? txId + " · transaction may be absent by design" : "not required") : (txId || "missing"));
+    check(outcome + ": Run → Transaction", !!txId,
+      txId || "missing");
 
     const intent = intentId ? getDocument("payment_intents", intentId) : null;
     const tx = txId ? getDocument("transactions", txId) : null;
@@ -117,8 +140,8 @@ function processSandboxAudit(body) {
     const txData = tx ? decodeFirestoreFields(tx.fields || {}) : null;
 
     check(outcome + ": Payment Intent exists", !!intentData, intentData ? "OK" : "missing");
-    check(outcome + ": Transaction exists", outcome === "FAILED" ? !txData : !!txData,
-      outcome === "FAILED" ? (txData ? "unexpected transaction exists" : "Not created for FAILED") : (txData ? "OK" : "missing"));
+    check(outcome + ": Transaction exists", !!txData,
+      txData ? "OK" : "missing");
 
     if (outcome === "SUCCESS") {
       check("SUCCESS: payment intent SUCCEEDED", !!intentData && intentData.status === "SUCCEEDED" && intentData.trusted === true && intentData.production === false,
@@ -144,8 +167,6 @@ function processSandboxAudit(body) {
     } else {
       check("FAILED: payment intent FAILED", !!intentData && intentData.status === "FAILED" && Number(intentData.amount) === expectedAmount && intentData.trusted === true && intentData.production === false,
         intentData ? "status="+intentData.status+", amount="+intentData.amount+", trusted="+intentData.trusted+", production="+intentData.production : "missing");
-      check("FAILED: payment FAILED", !!intentData && intentData.status === "FAILED" && intentData.trusted === true && intentData.production === false,
-        intentData ? "intent status="+intentData.status : "missing");
       const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
       check("FAILED: no ACTIVE ticket", !tickets.some(function(t){return t.data.status === "ACTIVE" && t.data.active === true;}),
         tickets.length ? tickets.length + " related ticket(s)" : "No related ticket");
@@ -154,25 +175,67 @@ function processSandboxAudit(body) {
     check(outcome + ": reference link", !!ref, ref || "sandbox_reference missing");
   });
 
-  const passed = checks.filter(function(c){return c.pass;}).length;
-  const failed = checks.length - passed;
-  const success = failed === 0 && outcomes.every(function(o){return !!selected[o];});
+  const passedChecks = checks.filter(function(c){return c.pass;}).length;
+  const failedChecks = checks.length - passedChecks;
+  const runResults = outcomes.map(function(outcome) {
+    const r = selected[outcome];
+    if (!r) {
+      return {
+        outcome: outcome,
+        sandboxRunId: null,
+        transactionId: null,
+        paymentIntentId: null,
+        ticketId: null,
+        ticketStatus: "MISSING",
+        status: "MISSING",
+        pass: false
+      };
+    }
+    const txId = String(r.data.sandbox_transaction_id || "");
+    const intentId = String(r.data.sandbox_payment_intent_id || "");
+    const tickets = related("tickets", "transaction_id", txId).concat(related("tickets", "payment_intent_id", intentId));
+    const active = tickets.find(function(t){return t.data.status === "ACTIVE" && t.data.active === true;}) || null;
+    const relatedChecks = checks.filter(function(c){return String(c.name || "").toUpperCase().startsWith(outcome + ":");});
+    const pass = relatedChecks.length > 0 && relatedChecks.every(function(c){return c.pass === true;});
+    return {
+      outcome: outcome,
+      sandboxRunId: r.id,
+      transactionId: txId || null,
+      paymentIntentId: intentId || null,
+      ticketId: active ? (active.data.ticket_id || active.id) : null,
+      ticketStatus: active ? "ACTIVE" : "NO ACTIVE ticket",
+      status: outcome,
+      pass: pass
+    };
+  });
+
+  const runPassCount = runResults.filter(function(r){return r.pass;}).length;
+  const runFailCount = runResults.length - runPassCount;
+  const success = !!anchor && runPassCount === outcomes.length;
 
   return {
     success: success,
     environment: "SANDBOX",
     readOnly: true,
+    production: false,
+    realBankCalled: false,
     amount: expectedAmount,
     overall: success ? "PASS" : "FAIL",
     summary: success ? "Sandbox audit berhasil" : "Sandbox audit menemukan pemeriksaan yang belum sesuai",
-    passCount: passed,
-    failCount: failed,
+    passCount: passedChecks,
+    failCount: failedChecks,
     checked: outcomes.length,
-    results: outcomes.map(function(o){
-      const r=selected[o];
-      return {outcome:o,sandboxRunId:r?r.id:null,transactionId:r?r.data.sandbox_transaction_id:null,paymentIntentId:r?r.data.sandbox_payment_intent_id:null,status:r?r.data.outcome:"MISSING"};
-    }),
+    runPassCount: runPassCount,
+    runFailCount: runFailCount,
+    errorCount: 0,
+    results: runResults,
     checks: checks,
+    batch: anchor ? {
+      eventId: anchor.data.event_id || null,
+      userId: anchor.data.user_id || null,
+      amount: expectedAmount,
+      anchorRunId: anchor.id
+    } : null,
     timestamp: new Date().toISOString()
   };
 }
