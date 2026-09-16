@@ -1,5 +1,5 @@
 window.BeePayConfig = {
-  API_URL: "YOUR_APPS_SCRIPT_WEB_APP_URL",
+  API_URL: "https://script.google.com/macros/s/AKfycbyzl-gDHVoeQZn1h9unv51nNHW59s-XrztMan9D2IMn0EIIu7y-13taHjNfBxBB03lqAA/exec",
   FIREBASE: {
     apiKey: "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks",
     authDomain: "beepay-2c2dc.firebaseapp.com",
