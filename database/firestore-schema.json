@@ -1,5 +1,5 @@
 {
-  "version": "22.8.1",
+  "version": "22.9.0",
   "collections": {
     "admins": {
       "fields": [
@@ -392,6 +392,28 @@
         "live",
         "created_at",
         "updated_at"
+      ]
+    },
+    "payment_receipts": {
+      "fields": [
+        "receipt_id",
+        "payment_id",
+        "transaction_id",
+        "payment_intent_id",
+        "order_id",
+        "event_id",
+        "user_id",
+        "amount",
+        "currency",
+        "status",
+        "provider",
+        "provider_reference",
+        "channel",
+        "issued_at",
+        "created_at",
+        "updated_at",
+        "production",
+        "source"
       ]
     }
   },
