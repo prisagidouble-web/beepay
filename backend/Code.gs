@@ -8,6 +8,7 @@
  * Phase 22.8.1 fixes lifecycle webhook test assertions for structured rejection responses.
  * Phase 22.9.0 adds payment receipt and reconciliation controls.
  * Phase 23.0.0 adds universal merchant integration and upgrade-payment contracts.
+ * Phase 23.2.0 adds universal merchant payment API contract.
  * Phase 23.1.0 adds merchant registry and API authentication boundary.
  * Phase 23.1.1 fixes sandbox merchant registry Firestore array encoding.
  *
@@ -18,7 +19,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.1.1";
+const BEEPAY_VERSION = "23.2.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -116,6 +117,16 @@ function doPost(e) {
     if (body.action === "sandbox_merchant_upgrade_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxMerchantUpgradeTest(body);
+      }));
+    }
+    if (body.action === "universal_payment_api_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processUniversalPaymentApiTest(body);
+      }));
+    }
+    if (body.action === "universal_payment_intent") {
+      return jsonResponse(withScriptLock(function() {
+        return processUniversalPaymentApiRequest(body);
       }));
     }
     if (body.action === "merchant_registry_status") {
@@ -1309,6 +1320,165 @@ function processSandboxMerchantRegistryTest(body){
     passCount:pass,failCount:fail,checked:checks.length,overall:fail===0?"PASS":"FAIL",
     merchantId:merchantId,applicationId:applicationId,apiKeyFingerprint:maskFingerprint_(rec.apiKeyFingerprint),
     checks:checks,message:fail===0?"Merchant Registry & API Authentication PASS: merchant aktif, credential terikat di trusted backend, key salah/inactive ditolak, raw secret tidak diekspos.":"Merchant Registry & API Authentication FAIL: periksa checks.",
+    timestamp:new Date().toISOString()};
+}
+
+/**
+ * Phase 23.2.0 — Universal Merchant Payment API.
+ * Merchant/application agnostic. Merchant API keys are authenticated against
+ * the trusted backend registry. Raw secrets never leave Script Properties.
+ */
+function findMerchantRegistryById_(merchantId) {
+  var docs=listDocuments("merchants",500);
+  for(var i=0;i<docs.length;i++){
+    var d=docs[i].data||{};
+    if(String(d.merchant_id||docs[i].id)===String(merchantId)) return d;
+  }
+  return null;
+}
+function verifyUniversalMerchantCredential_(body){
+  var result=authenticateMerchantApiKey_(body.merchantId||body.merchant_id,body.apiKey||body.api_key);
+  if(result.environment!=="SANDBOX" || result.production===true) throw new Error("Merchant environment tidak diizinkan.");
+  return result;
+}
+function validateUniversalPaymentRequest_(body){
+  var merchantId=validateMerchantId_(body.merchantId||body.merchant_id);
+  var applicationId=String(body.applicationId||body.application_id||"").trim();
+  var orderId=String(body.orderId||body.order_id||"").trim();
+  var amount=Number(body.amount);
+  var currency=String(body.currency||"IDR").trim().toUpperCase();
+  var channel=String(body.channel||"QRIS").trim().toUpperCase();
+  var purpose=normalizePaymentPurpose_(body.paymentPurpose||body.payment_purpose||"PURCHASE");
+  var idempotencyKey=String(body.idempotencyKey||body.idempotency_key||"").trim();
+  if(!applicationId) throw new Error("Application ID wajib.");
+  if(!orderId) throw new Error("Order ID wajib.");
+  if(!Number.isSafeInteger(amount)||amount<1) throw new Error("Amount harus berupa bilangan IDR yang valid.");
+  if(currency!=="IDR") throw new Error("Currency harus IDR.");
+  if(!idempotencyKey||idempotencyKey.length>120) throw new Error("Idempotency key wajib dan maksimal 120 karakter.");
+  var route=resolvePaymentRoute_(channel);
+  return {merchantId:merchantId,applicationId:applicationId,orderId:orderId,amount:amount,currency:currency,
+    channel:channel,paymentPurpose:purpose,idempotencyKey:idempotencyKey,route:route};
+}
+function createUniversalPaymentIntent_(order,req,createdBy){
+  var existing=listDocuments("payment_intents",200).find(function(item){
+    return String(item.data.idempotency_key||"")===req.idempotencyKey;
+  });
+  if(existing){
+    var ed=existing.data;
+    if(String(ed.order_id||"")!==req.orderId||String(ed.merchant_id||"")!==req.merchantId||
+       String(ed.application_id||"")!==req.applicationId||Number(ed.amount)!==req.amount){
+      throw new Error("Idempotency key sudah digunakan untuk parameter berbeda.");
+    }
+    return {success:true,existing:true,environment:"SANDBOX",production:false,trusted:true,
+      paymentIntentId:String(ed.payment_intent_id||existing.id),orderId:req.orderId,eventId:String(ed.event_id||order.event_id||""),
+      amount:req.amount,currency:req.currency,channel:String(ed.channel||req.channel),
+      provider:String(ed.provider||req.route.provider),providerAdapter:String(ed.provider_adapter||req.route.adapter),
+      routingId:String(ed.routing_id||req.route.routeId),merchantId:req.merchantId,applicationId:req.applicationId,
+      paymentPurpose:String(ed.payment_purpose||req.paymentPurpose),status:String(ed.status||"REQUIRES_PAYMENT"),
+      idempotent:true,credentialValuesExposed:false,message:"Payment Intent sudah ada untuk idempotency key tersebut.",
+      timestamp:new Date().toISOString()};
+  }
+  var stamp=Date.now(), intentId="PI-"+stamp, now=new Date().toISOString();
+  createDocument("payment_intents",intentId,{
+    payment_intent_id:str(intentId),order_id:str(req.orderId),user_id:str(order.user_id||""),
+    merchant_id:str(req.merchantId),application_id:str(req.applicationId),event_id:str(order.event_id||""),
+    payment_method_id:str(order.payment_method_id||""),amount:integer(req.amount),currency:str("IDR"),
+    channel:str(req.channel),provider:str(req.route.provider),provider_adapter:str(req.route.adapter),
+    routing_id:str(req.route.routeId),payment_purpose:str(req.paymentPurpose),
+    source_reference:str(bodySafeText_(req.sourceReference)),target_reference:str(bodySafeText_(req.targetReference)),
+    previous_amount:req.previousAmount===null?null:integer(req.previousAmount),
+    target_amount:req.targetAmount===null?null:integer(req.targetAmount),
+    upgrade_delta:req.upgradeDelta===null?null:integer(req.upgradeDelta),
+    client_reference:str(req.clientReference),idempotency_key:str(req.idempotencyKey),
+    status:str("REQUIRES_PAYMENT"),provider_reference:str(""),trusted:boolean(true),production:boolean(false),
+    created_by:str(createdBy||"MERCHANT_API"),created_by_backend:boolean(true),
+    created_at:timestamp(now),updated_at:timestamp(now),
+    expires_at:timestamp(new Date(Date.now()+getPaymentIntentExpirationMinutes_()*60000).toISOString())
+  });
+  return {success:true,existing:false,environment:"SANDBOX",production:false,trusted:true,
+    paymentIntentId:intentId,orderId:req.orderId,eventId:String(order.event_id||""),
+    amount:req.amount,currency:req.currency,channel:req.channel,provider:req.route.provider,
+    providerAdapter:req.route.adapter,routingId:req.route.routeId,merchantId:req.merchantId,
+    applicationId:req.applicationId,paymentPurpose:req.paymentPurpose,status:"REQUIRES_PAYMENT",
+    idempotent:false,credentialValuesExposed:false,
+    message:"Payment Intent berhasil dibuat oleh Universal Merchant Payment API melalui trusted backend.",
+    timestamp:now};
+}
+function bodySafeText_(v){ return String(v||"").trim(); }
+function processUniversalPaymentApiRequest(body){
+  var auth=verifyUniversalMerchantCredential_(body);
+  var req=validateUniversalPaymentRequest_(body);
+  if(auth.merchantId!==req.merchantId) throw new Error("Merchant identity mismatch.");
+  if(auth.applicationId && auth.applicationId!==req.applicationId) throw new Error("Application ID tidak cocok dengan merchant registry.");
+  var merchant=findMerchantRegistryById_(req.merchantId);
+  var allowed=merchant&&merchant.allowed_channels?merchant.allowed_channels:["QRIS","BANK_TRANSFER","VIRTUAL_ACCOUNT"];
+  if(Array.isArray(allowed)&&allowed.length&&allowed.indexOf(req.channel)<0) throw new Error("Channel tidak diizinkan untuk merchant.");
+  var orderDoc=getDocument("orders",req.orderId);
+  if(!orderDoc||!orderDoc.fields) throw new Error("Order tidak ditemukan: "+req.orderId);
+  var order=decodeFirestoreFields(orderDoc.fields||{});
+  if(order.production===true) throw new Error("Universal API sandbox tidak dapat memproses order production.");
+  if(String(order.merchant_id||"")!==req.merchantId) throw new Error("Order merchant mismatch.");
+  if(String(order.application_id||"")!==req.applicationId) throw new Error("Order application mismatch.");
+  if(Number(order.amount)!==req.amount) throw new Error("Order amount mismatch.");
+  if(String(order.currency||"IDR").toUpperCase()!==req.currency) throw new Error("Order currency mismatch.");
+  if(req.paymentPurpose==="UPGRADE"){
+    var prev=body.previousAmount==null?null:Number(body.previousAmount), target=body.targetAmount==null?null:Number(body.targetAmount);
+    var delta=body.upgradeDelta==null?null:Number(body.upgradeDelta);
+    if(!Number.isSafeInteger(prev)||!Number.isSafeInteger(target)||target<=prev) throw new Error("Upgrade membutuhkan previous_amount dan target_amount yang valid.");
+    if(delta!==null && delta!==target-prev) throw new Error("upgrade_delta harus sama dengan target_amount - previous_amount.");
+    if(req.amount!==target-prev) throw new Error("Amount API untuk UPGRADE harus sama dengan selisih target dan previous.");
+    req.previousAmount=prev;req.targetAmount=target;req.upgradeDelta=target-prev;
+  } else { req.previousAmount=null;req.targetAmount=null;req.upgradeDelta=null; }
+  req.clientReference=bodySafeText_(body.clientReference||body.client_reference);
+  req.sourceReference=bodySafeText_(body.sourceReference||body.source_reference);
+  req.targetReference=bodySafeText_(body.targetReference||body.target_reference);
+  return createUniversalPaymentIntent_(order,req,"MERCHANT_API:"+req.merchantId);
+}
+function processUniversalPaymentApiTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  var authUser=verifyFirebaseIdToken(body.idToken),admin=getAdminProfile(authUser.uid);
+  if(!admin||admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  var merchantId="SANDBOX-MERCHANT-231",merchant=findMerchantRegistryById_(merchantId),checks=[];
+  function add(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  add("Merchant registry fixture exists",!!merchant,merchantId);
+  if(!merchant) return {success:false,environment:"SANDBOX",production:false,passCount:1,failCount:1,checked:2,overall:"FAIL",checks:checks,message:"Merchant registry fixture belum tersedia. Jalankan Phase 23.1 Registry & Auth Test terlebih dahulu."};
+  var secret=String(PropertiesService.getScriptProperties().getProperty(merchantPropertyKey_(merchantId))||"").trim();
+  add("Merchant is ACTIVE",String(merchant.status||"").toUpperCase()==="ACTIVE",String(merchant.status||""));
+  add("Merchant environment is SANDBOX",String(merchant.environment||"").toUpperCase()==="SANDBOX",String(merchant.environment||""));
+  add("Credential exists only in trusted backend",!!secret,"Script Properties");
+  add("Raw credential is not returned",true,"credential omitted from API response");
+  add("Allowed QRIS channel exists",(merchant.allowed_channels||["QRIS"]).indexOf("QRIS")>=0,"QRIS");
+  var stamp=Date.now(),orderId="ORDER-API-232-"+stamp,now=new Date().toISOString();
+  createDocument("orders",orderId,{order_id:str(orderId),user_id:str(authUser.uid),merchant_id:str(merchantId),
+    application_id:str("SANDBOX-API-232"),event_id:str("SANDBOX-API-232"),amount:integer(125000),currency:str("IDR"),
+    status:str("PENDING_PAYMENT"),payment_method_id:str("SANDBOX"),reference:str("API-ORDER-"+stamp),
+    payment_purpose:str("PURCHASE"),created_by:str(authUser.uid),production:boolean(false),source:str("SANDBOX"),
+    created_at:timestamp(now),updated_at:timestamp(now)});
+  var request={merchantId:merchantId,applicationId:"SANDBOX-API-232",apiKey:secret,orderId:orderId,amount:125000,
+    currency:"IDR",channel:"QRIS",paymentPurpose:"PURCHASE",idempotencyKey:"API:"+merchantId+":"+orderId};
+  var result=null;
+  try{result=processUniversalPaymentApiRequest(request);add("Universal API creates Payment Intent",!!result.paymentIntentId,result.paymentIntentId);}
+  catch(e){add("Universal API creates Payment Intent",false,String(e.message||e));}
+  if(result){
+    add("Payment Intent status is REQUIRES_PAYMENT",result.status==="REQUIRES_PAYMENT",result.status);
+    add("Merchant binding is preserved",result.merchantId===merchantId&&result.applicationId==="SANDBOX-API-232","identity match");
+    add("Amount/currency/channel preserved",result.amount===125000&&result.currency==="IDR"&&result.channel==="QRIS","125000/IDR/QRIS");
+    add("Production remains OFF",result.production===false,"production=false");
+    add("Live bank remains OFF",result.liveBankCalled===false,"liveBankCalled=false");
+    add("Credential values are not exposed",result.credentialValuesExposed===false,"false");
+    var second=processUniversalPaymentApiRequest(request);
+    add("Same idempotency key is idempotent",second.paymentIntentId===result.paymentIntentId&&second.idempotent===true,"first="+result.paymentIntentId+" second="+second.paymentIntentId);
+    add("Idempotent response remains bound",second.merchantId===merchantId&&second.applicationId==="SANDBOX-API-232","identity match");
+    try{processUniversalPaymentApiRequest(Object.assign({},request,{apiKey:"INVALID-API-KEY"}));add("Invalid API key is rejected",false,"unexpectedly accepted");}
+    catch(e){add("Invalid API key is rejected",true,String(e.message||e));}
+    try{processUniversalPaymentApiRequest(Object.assign({},request,{merchantId:"SANDBOX-MERCHANT-DOES-NOT-EXIST"}));add("Unknown merchant is rejected",false,"unexpectedly accepted");}
+    catch(e){add("Unknown merchant is rejected",true,String(e.message||e));}
+  }
+  var passCount=checks.filter(function(x){return x.pass;}).length,failCount=checks.length-passCount;
+  return {success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,test:"UNIVERSAL_MERCHANT_PAYMENT_API",
+    passCount:passCount,failCount:failCount,checked:checks.length,overall:failCount===0?"PASS":"FAIL",merchantId:merchantId,
+    checks:checks,paymentIntentId:result?result.paymentIntentId:"",
+    message:failCount===0?"Universal Merchant Payment API PASS: merchant-authenticated API dapat membuat Payment Intent dan idempotency tetap aman.":"Universal Merchant Payment API FAIL: periksa checks.",
     timestamp:new Date().toISOString()};
 }
 function getProviderAdapter(provider) {
