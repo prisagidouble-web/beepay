@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 22.8.1</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 22.9.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -61,6 +61,16 @@
 <button id="paymentIntentLifecycleTestBtn" type="button">Run Lifecycle Test</button>
 </div>
 <div id="paymentIntentLifecycleMessage" class="message"></div>
+</section>
+<section id="paymentReconciliationPanel" class="panel" hidden>
+<div class="section-heading"><h2>Payment Receipt &amp; Reconciliation</h2><p>Memastikan receipt, transaction, payment, Payment Intent, Order, Event, User, nominal, dan provider reference tetap konsisten. Fase ini SANDBOX.</p></div>
+<div class="form-grid">
+<input id="paymentReconciliationIntentId" placeholder="Payment Intent ID SUCCESS">
+<button id="paymentReconciliationStatusBtn" type="button">Check Reconciliation</button>
+<button id="paymentReconciliationTestBtn" type="button">Run Reconciliation Test</button>
+</div>
+<div id="paymentReconciliationStatusMessage" class="message"></div>
+<div id="paymentReconciliationTestMessage" class="message"></div>
 </section>
 <section id="paymentRoutingPanel" class="panel" hidden>
 <div class="section-heading"><h2>Payment Channel Routing Abstraction</h2><p>Memisahkan channel pembayaran dari provider adapter. QRIS, BANK_TRANSFER, dan VIRTUAL_ACCOUNT diarahkan melalui trusted backend. Fase ini tetap SANDBOX dan live provider OFF.</p></div>
