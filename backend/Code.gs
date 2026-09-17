@@ -1,5 +1,5 @@
 /**
- * BeePay Backend - Phase 21
+ * BeePay Backend - Phase 22.2.1
  * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
  *
  * IMPORTANT:
@@ -39,6 +39,9 @@ function doPost(e) {
     }
     if (body.action === "create_payment_intent") {
       return jsonResponse(processCreatePaymentIntent(body));
+    }
+    if (body.action === "sandbox_create_order") {
+      return jsonResponse(processSandboxCreateOrder(body));
     }
     return jsonResponse({
       success: false,
@@ -321,6 +324,97 @@ function decodeFirestoreFields(fields) {
  * It does NOT create a transaction, mark a payment as PAID, or activate a ticket.
  * All state-changing payment completion remains a trusted-backend concern.
  */
+/**
+ * Create or reuse a deterministic Sandbox Order Fixture.
+ *
+ * This is intentionally admin-only and SANDBOX-only. It gives Phase 22.2
+ * tests a real order document that can be consumed by create_payment_intent.
+ * No production order is created or modified.
+ */
+function processSandboxCreateOrder(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const orderId = String(body.orderId || "ORDER-SBX-001").trim();
+  const eventId = String(body.eventId || "EVENT-002").trim();
+  const userId = String(body.userId || "TEST-USER-002").trim();
+  const amount = Number(body.amount || 100000);
+
+  if (!/^ORDER-SBX-[A-Z0-9_-]+$/i.test(orderId)) {
+    throw new Error("Order Sandbox harus menggunakan prefix ORDER-SBX-.");
+  }
+  if (!eventId || !userId) throw new Error("Event ID dan User ID wajib.");
+  if (!Number.isSafeInteger(amount) || amount < 1) {
+    throw new Error("Amount harus berupa bilangan IDR yang valid.");
+  }
+
+  const existingDoc = getDocument("orders", orderId);
+  if (existingDoc && existingDoc.fields) {
+    const existing = decodeFirestoreFields(existingDoc.fields || {});
+    if (
+      existing.production === true ||
+      String(existing.event_id || "") !== eventId ||
+      String(existing.user_id || "") !== userId ||
+      Number(existing.amount) !== amount
+    ) {
+      throw new Error("Order Sandbox ID sudah digunakan dengan data berbeda atau merupakan order production.");
+    }
+    return {
+      success: true,
+      existing: true,
+      environment: "SANDBOX",
+      production: false,
+      trusted: true,
+      orderId: orderId,
+      eventId: eventId,
+      userId: userId,
+      amount: amount,
+      currency: "IDR",
+      status: String(existing.status || "PENDING_PAYMENT"),
+      message: "Sandbox Order sudah tersedia dan siap digunakan.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  const now = new Date().toISOString();
+  createDocument("orders", orderId, {
+    order_id: str(orderId),
+    user_id: str(userId),
+    merchant_id: str("SANDBOX-MERCHANT"),
+    event_id: str(eventId),
+    amount: integer(amount),
+    currency: str("IDR"),
+    status: str("PENDING_PAYMENT"),
+    payment_method_id: str("SANDBOX"),
+    reference: str("SANDBOX-ORDER-" + Date.now()),
+    created_by: str(authUser.uid),
+    production: boolean(false),
+    source: str("SANDBOX"),
+    created_at: timestamp(now),
+    updated_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    existing: false,
+    environment: "SANDBOX",
+    production: false,
+    trusted: true,
+    orderId: orderId,
+    eventId: eventId,
+    userId: userId,
+    amount: amount,
+    currency: "IDR",
+    status: "PENDING_PAYMENT",
+    message: "Sandbox Order berhasil dibuat oleh trusted backend dan siap digunakan.",
+    timestamp: now
+  };
+}
+
 function processCreatePaymentIntent(body) {
   if (!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser = verifyFirebaseIdToken(body.idToken);
