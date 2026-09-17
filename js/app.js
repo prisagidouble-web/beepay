@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.8.0",
+version:"22.8.1",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -228,11 +228,15 @@ try{
 const idToken=await currentUser.getIdToken(true);
 const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_payment_intent_lifecycle_test",idToken})});
 const result=await response.json();
-if(!result.success)throw new Error(result.error||"Payment Intent Lifecycle Test gagal.");
-const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}`).join(" · ");
+const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
+if(!result.success){
+m.textContent=`Payment Intent Lifecycle ${result.overall||"FAIL"}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||result.error||"Test gagal."} ${detail}`;
+return;
+}
 m.textContent=`Payment Intent Lifecycle ${result.overall}: PASS ${result.passCount} · FAIL ${result.failCount}. ${result.message} ${detail}`;
 }catch(e){console.error(e);m.textContent="Payment Intent Lifecycle Test gagal: "+e.message}
 },
+
 async runProviderAdapterTest(){
 const m=document.getElementById("providerAdapterTestMessage");
 if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
