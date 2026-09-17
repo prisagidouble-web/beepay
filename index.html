@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 22.9.0</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 23.0.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -61,6 +61,17 @@
 <button id="paymentIntentLifecycleTestBtn" type="button">Run Lifecycle Test</button>
 </div>
 <div id="paymentIntentLifecycleMessage" class="message"></div>
+</section>
+<section id="merchantContractPanel" class="panel" hidden>
+<div class="section-heading"><h2>Universal Merchant Integration &amp; Upgrade</h2><p>BeePay dapat dipakai oleh aplikasi apa pun. Mendukung PURCHASE, UPGRADE, ADJUSTMENT, RENEWAL, REGISTRATION, INVOICE, dan OTHER. Upgrade menagih hanya selisih harga; perubahan business object dilakukan oleh merchant setelah payment PAID.</p></div>
+<div class="form-grid">
+<input id="merchantContractMerchantId" value="DEMO-TICKETING" placeholder="Merchant ID">
+<input id="merchantContractApplicationId" value="DEMO-TICKETING-APP" placeholder="Application ID">
+<button id="merchantContractStatusBtn" type="button">Check Universal Contract</button>
+<button id="merchantUpgradeTestBtn" type="button">Run Upgrade Test</button>
+</div>
+<div id="merchantContractStatusMessage" class="message"></div>
+<div id="merchantUpgradeTestMessage" class="message"></div>
 </section>
 <section id="paymentReconciliationPanel" class="panel" hidden>
 <div class="section-heading"><h2>Payment Receipt &amp; Reconciliation</h2><p>Memastikan receipt, transaction, payment, Payment Intent, Order, Event, User, nominal, dan provider reference tetap konsisten. Fase ini SANDBOX.</p></div>
