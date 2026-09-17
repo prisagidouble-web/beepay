@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 22.2.1</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 22.3.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -24,6 +24,16 @@
 <button id="sandboxOrderBtn" type="button">Create Sandbox Order</button>
 </div>
 <div id="sandboxOrderMessage" class="message"></div>
+</section>
+<section id="bindingHardeningPanel" class="panel" hidden>
+<div class="section-heading"><h2>Binding &amp; Idempotency Hardening</h2><p>Memastikan satu Payment Intent tidak menghasilkan transaction/payment/ticket ganda dan seluruh record tetap terikat pada Order, Event, User, dan nominal yang sama.</p></div>
+<div class="form-grid">
+<input id="bindingAuditIntentId" type="text" placeholder="Payment Intent ID untuk audit binding">
+<button id="bindingAuditBtn" type="button">Audit Binding</button>
+<button id="idempotencyTestBtn" type="button">Test Idempotency</button>
+</div>
+<div id="bindingAuditMessage" class="message"></div>
+<div id="idempotencyTestMessage" class="message"></div>
 </section>
 <section id="paymentProcessing" class="panel" hidden>
 <div class="section-heading"><h2>Payment Intent</h2><p>Membuat payment intent yang aman untuk satu order. Belum terhubung ke bank/PJP live.</p></div>
