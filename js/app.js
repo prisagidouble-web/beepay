@@ -4,8 +4,8 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.6.0",
-async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
+version:"22.7.0",
+async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
 bindAuth(){
@@ -21,7 +21,7 @@ document.getElementById("logoutButton").hidden=!yes;
 document.getElementById("rolePanel").hidden=!yes;
 document.getElementById("paymentProcessing").hidden=!yes;
 if(document.getElementById("sandboxOrderPanel"))document.getElementById("sandboxOrderPanel").hidden=!yes;
-if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;
+if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;if(document.getElementById("paymentRoutingPanel"))document.getElementById("paymentRoutingPanel").hidden=!yes;
 if(!yes){document.getElementById("authMessage").textContent="Belum login.";return}
 try{
   const snap=await getDoc(doc(db,"admin_users",u.uid));
@@ -69,7 +69,7 @@ async logout(){if(auth)await signOut(auth)},
 bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()});document.getElementById("sandboxOrderBtn")?.addEventListener("click",()=>this.createSandboxOrder());document.getElementById("bindingAuditBtn")?.addEventListener("click",()=>this.runBindingAudit());document.getElementById("idempotencyTestBtn")?.addEventListener("click",()=>this.runIdempotencyTest())},
 bindCheckout(){document.getElementById("checkoutForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createCheckout()})},
 bindWebhook(){document.getElementById("webhookForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createWebhookLedger()})},bindWebhookSimulation(){document.getElementById("webhookSimulationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runWebhookSimulation()});document.getElementById("webhookLifecycleTestBtn")?.addEventListener("click",()=>this.runWebhookLifecycleTest())},bindProviderAdapter(){document.getElementById("providerAdapterTestBtn")?.addEventListener("click",()=>this.runProviderAdapterTest())},
-bindProviderConfig(){document.getElementById("providerConfigStatusBtn")?.addEventListener("click",()=>this.loadProviderConfigStatus());document.getElementById("providerConfigTestBtn")?.addEventListener("click",()=>this.runProviderConfigTest())},
+bindProviderConfig(){document.getElementById("providerConfigStatusBtn")?.addEventListener("click",()=>this.loadProviderConfigStatus());document.getElementById("providerConfigTestBtn")?.addEventListener("click",()=>this.runProviderConfigTest())},bindPaymentRouting(){document.getElementById("paymentRoutingStatusBtn")?.addEventListener("click",()=>this.loadPaymentRoutingStatus());document.getElementById("paymentRoutingTestBtn")?.addEventListener("click",()=>this.runPaymentRoutingTest())},
 bindVerification(){document.getElementById("verificationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createVerificationRecord()})},
 bindResult(){document.getElementById("resultForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createResultRecord()})},
 bindTicket(){document.getElementById("ticketForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createTicketRecord()})},
@@ -190,6 +190,34 @@ if(!result.success)throw new Error(result.error||"Provider Configuration Boundar
 const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}`).join(" · ");
 m.textContent=`Provider Configuration Boundary ${result.overall}: PASS ${result.passCount} · FAIL ${result.failCount}. ${result.message} ${detail}`;
 }catch(e){console.error(e);m.textContent="Provider Configuration Boundary Test gagal: "+e.message}
+},
+async loadPaymentRoutingStatus(){
+const m=document.getElementById("paymentRoutingStatusMessage");
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+m.textContent="Memeriksa payment channel routing...";
+try{
+const idToken=await currentUser.getIdToken(true);
+const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"provider_routing_status",idToken})});
+const result=await response.json();
+if(!result.success)throw new Error(result.error||"Gagal membaca payment channel routing.");
+const routes=(result.channels||[]).map(x=>`${x.channel} → ${x.provider}`).join(" · ");
+m.textContent=`Environment ${result.environment} · Live ${result.liveBankCalled?"ON":"OFF"} · ${routes} · Credential values exposed: ${result.credentialValuesExposed?"YES":"NO"}.`;
+}catch(e){console.error(e);m.textContent="Payment channel routing gagal: "+e.message}
+},
+async runPaymentRoutingTest(){
+const m=document.getElementById("paymentRoutingTestMessage");
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+m.textContent="Menjalankan Payment Channel Routing Test...";
+try{
+const idToken=await currentUser.getIdToken(true);
+const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_provider_routing_test",idToken})});
+const result=await response.json();
+if(!result.success)throw new Error(result.error||"Payment Channel Routing Test gagal.");
+const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}`).join(" · ");
+m.textContent=`Payment Channel Routing ${result.overall}: PASS ${result.passCount} · FAIL ${result.failCount}. ${result.message} ${detail}`;
+}catch(e){console.error(e);m.textContent="Payment Channel Routing Test gagal: "+e.message}
 },
 async runProviderAdapterTest(){
 const m=document.getElementById("providerAdapterTestMessage");
