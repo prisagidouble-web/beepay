@@ -9,6 +9,7 @@
  * Phase 22.9.0 adds payment receipt and reconciliation controls.
  * Phase 23.0.0 adds universal merchant integration and upgrade-payment contracts.
  * Phase 23.1.0 adds merchant registry and API authentication boundary.
+ * Phase 23.1.1 fixes sandbox merchant registry Firestore array encoding.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -17,7 +18,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.1.0";
+const BEEPAY_VERSION = "23.1.1";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -1220,7 +1221,7 @@ function ensureSandboxMerchant_(merchantId,applicationId,createdBy) {
     created_by:str(createdBy||"SYSTEM"),created_at:timestamp(now),updated_at:timestamp(now),
     application_id:str(appId),environment:str("SANDBOX"),production:boolean(false),
     api_key_fingerprint:str(fingerprint),api_key_present:boolean(true),
-    allowed_channels:array(["QRIS","BANK_TRANSFER","VIRTUAL_ACCOUNT"]),
+    allowed_channels:arrayValue(["QRIS","BANK_TRANSFER","VIRTUAL_ACCOUNT"]),
     webhook_enabled:boolean(true)
   });
   return {merchantId:id,applicationId:appId,status:"ACTIVE",environment:"SANDBOX",
@@ -2894,6 +2895,7 @@ function str(value) { return {stringValue: String(value)}; }
 function integer(value) { return {integerValue: String(value)}; }
 function boolean(value) { return {booleanValue: Boolean(value)}; }
 function timestamp(value) { return {timestampValue: value}; }
+function arrayValue(values) { return {arrayValue: {values: (values || []).map(function(v) { return str(v); })}}; }
 
 function parseRequestBody(e) {
   if (!e || !e.postData || !e.postData.contents) return {};
