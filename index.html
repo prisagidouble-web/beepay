@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 22.4.0</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 22.5.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -52,6 +52,15 @@
 </form>
 <div id="webhookSimulationMessage" class="message"></div>
 <div id="webhookLifecycleTestMessage" class="message"></div>
+</section>
+<section id="providerAdapterPanel" class="panel" hidden>
+<div class="section-heading"><h2>Provider Adapter &amp; Webhook Security</h2><p>Memisahkan aturan provider dari core BeePay dan menguji signature, event mapping, mismatch, idempotency, serta larangan provider live. Fase ini masih SANDBOX.</p></div>
+<div class="form-grid">
+<input id="providerAdapterName" value="SANDBOX-PJP" readonly placeholder="Provider Adapter">
+<input id="providerAdapterAlgorithm" value="SHA-256" readonly placeholder="Signature Algorithm">
+<button id="providerAdapterTestBtn" type="button">Run Adapter Security Test</button>
+</div>
+<div id="providerAdapterTestMessage" class="message"></div>
 </section>
 <section id="paymentProcessing" class="panel" hidden>
 <div class="section-heading"><h2>Payment Intent</h2><p>Membuat payment intent yang aman untuk satu order. Belum terhubung ke bank/PJP live.</p></div>
