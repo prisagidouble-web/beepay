@@ -1,5 +1,5 @@
 {
-  "version": "22.2.0",
+  "version": "22.4.0",
   "collections": {
     "admins": {
       "fields": [
@@ -185,7 +185,11 @@
         "received_at",
         "processed_at",
         "processing_result",
-        "created_by"
+        "created_by",
+        "provider_event_id",
+        "payment_intent_id",
+        "target_status",
+        "production"
       ]
     },
     "tickets": {
