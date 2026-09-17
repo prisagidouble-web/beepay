@@ -1,5 +1,5 @@
 {
-  "version": "22.7.0",
+  "version": "22.8.0",
   "collections": {
     "admins": {
       "fields": [
@@ -143,7 +143,10 @@
         "last_sandbox_run_id",
         "provider",
         "provider_adapter",
-        "routing_id"
+        "routing_id",
+        "expired_at",
+        "cancelled_at",
+        "lifecycle_reason"
       ]
     },
     "payments": {
