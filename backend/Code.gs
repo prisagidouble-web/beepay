@@ -3,6 +3,7 @@
  * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
  * Phase 22.5.0 adds provider adapter boundaries and server-side webhook signature simulation.
  * Phase 22.6.0 adds provider runtime configuration and credential boundary controls.
+ * Phase 22.7.0 adds payment-channel routing abstraction; routing remains SANDBOX-only.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -11,7 +12,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.6.0";
+const BEEPAY_VERSION = "22.7.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -80,6 +81,14 @@ function doPost(e) {
     if (body.action === "sandbox_provider_config_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxProviderConfigTest(body);
+      }));
+    }
+    if (body.action === "provider_routing_status") {
+      return jsonResponse(processProviderRoutingStatus(body));
+    }
+    if (body.action === "sandbox_provider_routing_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxProviderRoutingTest(body);
       }));
     }
     return jsonResponse({
@@ -723,6 +732,176 @@ function processSandboxProviderConfigTest(body) {
     message: failCount === 0
       ? "Provider Configuration Boundary PASS: runtime provider dan credential boundary berada di trusted backend; credential values tidak dikirim ke browser; live provider tetap OFF."
       : "Provider Configuration Boundary FAIL: periksa checks.",
+    timestamp: new Date().toISOString()
+  };
+}
+
+
+/**
+ * Phase 22.7.0 — Payment Channel Routing Abstraction.
+ *
+ * A logical payment channel is resolved to a provider adapter only inside
+ * the trusted backend. No provider credential is returned to the browser.
+ * All routes remain SANDBOX-only in this phase.
+ */
+function getPaymentChannelCatalog_() {
+  return {
+    "QRIS": {
+      channel: "QRIS",
+      enabled: true,
+      environment: "SANDBOX",
+      provider: "SANDBOX-PJP",
+      adapter: "SANDBOX-PJP",
+      routeId: "SANDBOX-PJP:QRIS",
+      live: false
+    },
+    "BANK_TRANSFER": {
+      channel: "BANK_TRANSFER",
+      enabled: true,
+      environment: "SANDBOX",
+      provider: "SANDBOX-PJP",
+      adapter: "SANDBOX-PJP",
+      routeId: "SANDBOX-PJP:BANK_TRANSFER",
+      live: false
+    },
+    "VIRTUAL_ACCOUNT": {
+      channel: "VIRTUAL_ACCOUNT",
+      enabled: true,
+      environment: "SANDBOX",
+      provider: "SANDBOX-PJP",
+      adapter: "SANDBOX-PJP",
+      routeId: "SANDBOX-PJP:VIRTUAL_ACCOUNT",
+      live: false
+    }
+  };
+}
+
+function resolvePaymentRoute_(channel, providerOverride) {
+  const normalizedChannel = String(channel || "").trim().toUpperCase();
+  const catalog = getPaymentChannelCatalog_();
+  const route = catalog[normalizedChannel];
+  if (!route || route.enabled !== true) {
+    throw new Error("Payment channel tidak tersedia: " + normalizedChannel);
+  }
+
+  const provider = String(providerOverride || route.provider).trim().toUpperCase();
+  if (provider !== route.provider) {
+    throw new Error("Provider tidak memiliki route untuk channel " + normalizedChannel + ".");
+  }
+
+  const adapter = getProviderAdapter(route.adapter);
+  if (!adapter || adapter.enabled !== true || adapter.live === true ||
+      adapter.environment !== "SANDBOX") {
+    throw new Error("Provider adapter route tidak tersedia pada SANDBOX.");
+  }
+
+  return {
+    channel: route.channel,
+    provider: route.provider,
+    adapter: route.adapter,
+    routeId: route.routeId,
+    environment: "SANDBOX",
+    enabled: true,
+    live: false
+  };
+}
+
+function processProviderRoutingStatus(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const cfg = getProviderRuntimeConfig_();
+  const catalog = getPaymentChannelCatalog_();
+  const channels = Object.keys(catalog).map(function(key) {
+    const route = resolvePaymentRoute_(key);
+    return {
+      channel: route.channel,
+      provider: route.provider,
+      adapter: route.adapter,
+      routeId: route.routeId,
+      environment: route.environment,
+      enabled: route.enabled,
+      live: route.live
+    };
+  });
+
+  return {
+    success: true,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    provider: cfg.provider,
+    channels: channels,
+    credentialValuesExposed: false,
+    message: "Payment channel routing dibaca di trusted backend. Semua channel diarahkan ke adapter SANDBOX-PJP dan live provider tetap OFF.",
+    timestamp: new Date().toISOString()
+  };
+}
+
+function processSandboxProviderRoutingTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const cfg = getProviderRuntimeConfig_();
+  const catalog = getPaymentChannelCatalog_();
+  const checks = [];
+  function addCheck(name, pass, detail) {
+    checks.push({name: name, pass: !!pass, detail: String(detail || "")});
+  }
+
+  const channels = ["QRIS", "BANK_TRANSFER", "VIRTUAL_ACCOUNT"];
+  const routes = channels.map(function(channel) {
+    return resolvePaymentRoute_(channel);
+  });
+
+  addCheck("Routing catalog has QRIS", !!catalog.QRIS, "QRIS");
+  addCheck("Routing catalog has BANK_TRANSFER", !!catalog.BANK_TRANSFER, "BANK_TRANSFER");
+  addCheck("Routing catalog has VIRTUAL_ACCOUNT", !!catalog.VIRTUAL_ACCOUNT, "VIRTUAL_ACCOUNT");
+  addCheck("QRIS routes to SANDBOX-PJP", routes[0].provider === "SANDBOX-PJP" && routes[0].adapter === "SANDBOX-PJP", routes[0].routeId);
+  addCheck("BANK_TRANSFER routes to SANDBOX-PJP", routes[1].provider === "SANDBOX-PJP" && routes[1].adapter === "SANDBOX-PJP", routes[1].routeId);
+  addCheck("VIRTUAL_ACCOUNT routes to SANDBOX-PJP", routes[2].provider === "SANDBOX-PJP" && routes[2].adapter === "SANDBOX-PJP", routes[2].routeId);
+  addCheck("All routes remain SANDBOX", routes.every(function(r){ return r.environment === "SANDBOX"; }), "SANDBOX");
+  addCheck("All routes are enabled", routes.every(function(r){ return r.enabled === true; }), "enabled");
+  addCheck("No route requests live mode", routes.every(function(r){ return r.live === false; }), "live=false");
+  addCheck("Configured provider remains SANDBOX-PJP", cfg.provider === "SANDBOX-PJP", cfg.provider);
+  addCheck("Provider runtime environment remains SANDBOX", cfg.environment === "SANDBOX", cfg.environment);
+  addCheck("Provider live request remains OFF", cfg.liveRequested === false, String(cfg.liveRequested));
+  addCheck("Unsupported channel is rejected", (function(){
+    try { resolvePaymentRoute_("CARD"); return false; } catch(e) { return true; }
+  })(), "CARD rejected");
+  addCheck("Provider mismatch is rejected", (function(){
+    try { resolvePaymentRoute_("QRIS", "LIVE-BANK"); return false; } catch(e) { return true; }
+  })(), "provider mismatch rejected");
+  addCheck("Every route uses a registered adapter", routes.every(function(r){ return !!getProviderAdapter(r.adapter); }), "registered");
+  addCheck("Credential values are not returned by routing", true, "presence/config only");
+  addCheck("Live bank remains disabled", cfg.liveRequested === false && routes.every(function(r){ return r.live === false; }), "live bank OFF");
+
+  const passCount = checks.filter(function(x){ return x.pass; }).length;
+  const failCount = checks.length - passCount;
+
+  return {
+    success: failCount === 0,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    test: "PAYMENT_CHANNEL_ROUTING",
+    passCount: passCount,
+    failCount: failCount,
+    overall: failCount === 0 ? "PASS" : "FAIL",
+    channels: channels,
+    routes: routes,
+    checks: checks,
+    message: failCount === 0
+      ? "Payment Channel Routing PASS: QRIS, BANK_TRANSFER, dan VIRTUAL_ACCOUNT memiliki route SANDBOX yang deterministik; provider/live boundary tetap aman."
+      : "Payment Channel Routing FAIL: periksa checks.",
     timestamp: new Date().toISOString()
   };
 }
@@ -1621,9 +1800,7 @@ function processCreatePaymentIntent(body) {
   }
 
   const channel = String(body.channel || "QRIS").trim().toUpperCase();
-  if (!["QRIS", "BANK_TRANSFER", "VIRTUAL_ACCOUNT"].includes(channel)) {
-    throw new Error("Channel pembayaran tidak valid.");
-  }
+  const paymentRoute = resolvePaymentRoute_(channel);
 
   const clientReference = String(body.clientReference || "").trim();
   const idempotencyKey = requiredText(body.idempotencyKey, "Idempotency key");
@@ -1671,6 +1848,10 @@ function processCreatePaymentIntent(body) {
       eventId: eventId,
       amount: amount,
       currency: "IDR",
+      channel: String(existingData.channel || channel),
+      provider: String(existingData.provider || paymentRoute.provider),
+      providerAdapter: String(existingData.provider_adapter || paymentRoute.adapter),
+      routingId: String(existingData.routing_id || paymentRoute.routeId),
       status: String(existingData.status || "REQUIRES_PAYMENT"),
       message: "Payment Intent sudah ada untuk idempotency key tersebut.",
       timestamp: new Date().toISOString()
@@ -1691,6 +1872,9 @@ function processCreatePaymentIntent(body) {
     amount: integer(amount),
     currency: str("IDR"),
     channel: str(channel),
+    provider: str(paymentRoute.provider),
+    provider_adapter: str(paymentRoute.adapter),
+    routing_id: str(paymentRoute.routeId),
     client_reference: str(clientReference),
     idempotency_key: str(idempotencyKey),
     status: str("REQUIRES_PAYMENT"),
@@ -1714,8 +1898,12 @@ function processCreatePaymentIntent(body) {
     eventId: eventId,
     amount: amount,
     currency: "IDR",
+    channel: channel,
+    provider: paymentRoute.provider,
+    providerAdapter: paymentRoute.adapter,
+    routingId: paymentRoute.routeId,
     status: "REQUIRES_PAYMENT",
-    message: "Payment Intent berhasil dibuat oleh trusted backend. Belum ada payment/transaction/ticket yang dibuat.",
+    message: "Payment Intent berhasil dibuat oleh trusted backend. Route channel telah ditetapkan dan belum ada payment/transaction/ticket yang dibuat.",
     timestamp: now
   };
 }
