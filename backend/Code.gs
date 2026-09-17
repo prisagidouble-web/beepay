@@ -4,6 +4,7 @@
  * Phase 22.5.0 adds provider adapter boundaries and server-side webhook signature simulation.
  * Phase 22.6.0 adds provider runtime configuration and credential boundary controls.
  * Phase 22.7.0 adds payment-channel routing abstraction; routing remains SANDBOX-only.
+ * Phase 22.8.0 adds Payment Intent expiration/cancellation lifecycle guards and tests.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -12,7 +13,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.7.0";
+const BEEPAY_VERSION = "22.8.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -89,6 +90,11 @@ function doPost(e) {
     if (body.action === "sandbox_provider_routing_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxProviderRoutingTest(body);
+      }));
+    }
+    if (body.action === "sandbox_payment_intent_lifecycle_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxPaymentIntentLifecycleTest(body);
       }));
     }
     return jsonResponse({
@@ -1297,7 +1303,7 @@ function processSandboxWebhook(body) {
   }
 
   const currentStatus = String(intent.status || "").toUpperCase();
-  const terminal = ["SUCCEEDED","FAILED"];
+  const terminal = ["SUCCEEDED","FAILED","EXPIRED","CANCELLED"];
   if (terminal.includes(currentStatus)) {
     createDocument("webhooks", webhookId, {
       webhook_id: str(webhookId),
@@ -1784,6 +1790,226 @@ function processSandboxCreateOrder(body) {
   };
 }
 
+
+function isPaymentIntentTerminalStatus_(status) {
+  return ["SUCCEEDED", "FAILED", "EXPIRED", "CANCELLED"].includes(
+    String(status || "").toUpperCase()
+  );
+}
+
+function getPaymentIntentExpirationMinutes_() {
+  const props = PropertiesService.getScriptProperties();
+  const raw = Number(props.getProperty("BEEPAY_PAYMENT_INTENT_EXPIRATION_MINUTES") || 30);
+  if (!Number.isFinite(raw) || raw < 1 || raw > 1440) return 30;
+  return Math.floor(raw);
+}
+
+function isPaymentIntentExpired_(intent) {
+  const expiresAt = String(intent.expires_at || "").trim();
+  if (!expiresAt) return false;
+  const ms = Date.parse(expiresAt);
+  return Number.isFinite(ms) && ms <= Date.now();
+}
+
+function transitionPaymentIntentLifecycle_(paymentIntentId, targetStatus, reason, forceExpired) {
+  const doc = getDocument("payment_intents", paymentIntentId);
+  if (!doc || !doc.fields) throw new Error("Payment Intent tidak ditemukan: " + paymentIntentId);
+  const intent = decodeFirestoreFields(doc.fields || {});
+  if (intent.production !== false || intent.trusted !== true || intent.created_by_backend !== true) {
+    throw new Error("Payment Intent bukan intent sandbox trusted backend.");
+  }
+
+  const current = String(intent.status || "").toUpperCase();
+  const target = String(targetStatus || "").toUpperCase();
+  if (!["EXPIRED", "CANCELLED"].includes(target)) {
+    throw new Error("Lifecycle target tidak valid.");
+  }
+  if (isPaymentIntentTerminalStatus_(current)) {
+    return {
+      success: true,
+      existing: true,
+      idempotent: current === target,
+      paymentIntentId: paymentIntentId,
+      previousStatus: current,
+      status: current,
+      message: current === target
+        ? "Payment Intent sudah berada pada status lifecycle tersebut."
+        : "Payment Intent sudah terminal dan tidak dapat ditransisikan ke status lain."
+    };
+  }
+  if (target === "EXPIRED" && !forceExpired && !isPaymentIntentExpired_(intent)) {
+    throw new Error("Payment Intent belum melewati expires_at.");
+  }
+
+  const now = new Date().toISOString();
+  const fields = {
+    status: str(target),
+    lifecycle_reason: str(reason || target),
+    updated_at: timestamp(now)
+  };
+  if (target === "EXPIRED") fields.expired_at = timestamp(now);
+  if (target === "CANCELLED") fields.cancelled_at = timestamp(now);
+  updateDocument("payment_intents", paymentIntentId, fields, Object.keys(fields));
+
+  return {
+    success: true,
+    existing: false,
+    idempotent: false,
+    paymentIntentId: paymentIntentId,
+    previousStatus: current,
+    status: target,
+    message: "Payment Intent berhasil ditransisikan ke " + target + ".",
+    timestamp: now
+  };
+}
+
+function processSandboxPaymentIntentLifecycleTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const stamp = Date.now();
+  const eventId = "EVENT-228-" + stamp;
+  const userId = "TEST-USER-228-" + stamp;
+  const amount = 125000;
+  const checks = [];
+  function addCheck(name, pass, detail) {
+    checks.push({name: name, pass: !!pass, detail: String(detail || "")});
+  }
+  function makeOrderIntent(suffix, expiresAt) {
+    const orderId = "ORDER-SBX-228-" + stamp + "-" + suffix;
+    const intentId = "PI-228-" + stamp + "-" + suffix;
+    const now = new Date().toISOString();
+    createDocument("orders", orderId, {
+      order_id: str(orderId), user_id: str(userId), merchant_id: str("SANDBOX-MERCHANT"),
+      event_id: str(eventId), amount: integer(amount), currency: str("IDR"),
+      status: str("PENDING_PAYMENT"), payment_method_id: str("SANDBOX"),
+      reference: str("SANDBOX-228-" + stamp + "-" + suffix),
+      created_by: str(authUser.uid), production: boolean(false), source: str("SANDBOX"),
+      created_at: timestamp(now), updated_at: timestamp(now)
+    });
+    createDocument("payment_intents", intentId, {
+      payment_intent_id: str(intentId), order_id: str(orderId), user_id: str(userId),
+      merchant_id: str("SANDBOX-MERCHANT"), event_id: str(eventId),
+      amount: integer(amount), currency: str("IDR"), channel: str("QRIS"),
+      provider: str("SANDBOX-PJP"), provider_adapter: str("SANDBOX-PJP"),
+      routing_id: str("SANDBOX-PJP:QRIS"), idempotency_key: str("SBX-228:" + intentId),
+      status: str("REQUIRES_PAYMENT"), provider_reference: str(""),
+      trusted: boolean(true), production: boolean(false), created_by: str(authUser.uid),
+      created_by_backend: boolean(true), created_at: timestamp(now),
+      updated_at: timestamp(now), expires_at: timestamp(expiresAt)
+    });
+    return {orderId: orderId, intentId: intentId};
+  }
+
+  const past = new Date(Date.now() - 60 * 1000).toISOString();
+  const future = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const exp = makeOrderIntent("EXP", past);
+  const cancel = makeOrderIntent("CAN", future);
+
+  const expDoc = getDocument("payment_intents", exp.intentId);
+  const expIntent = decodeFirestoreFields(expDoc.fields || {});
+  addCheck("New intent has expires_at", !!expIntent.expires_at, expIntent.expires_at);
+  addCheck("New intent starts REQUIRES_PAYMENT", String(expIntent.status) === "REQUIRES_PAYMENT", expIntent.status);
+  addCheck("Past expires_at is detected", isPaymentIntentExpired_(expIntent) === true, "expired=true");
+
+  const expTransition = transitionPaymentIntentLifecycle_(exp.intentId, "EXPIRED", "SANDBOX_EXPIRED_TEST", false);
+  addCheck("Expired transition accepted", expTransition.success && expTransition.status === "EXPIRED", expTransition.message);
+
+  let paymentRejected = false, paymentReason = "";
+  try {
+    processSandboxPayment({
+      idToken: body.idToken, paymentIntentId: exp.intentId, eventId: eventId,
+      userId: userId, amount: amount, outcome: "SUCCESS"
+    });
+  } catch (e) {
+    paymentRejected = true; paymentReason = String(e.message || e);
+  }
+  addCheck("Expired intent blocks payment", paymentRejected, paymentReason);
+
+  let webhookRejected = false, webhookReason = "";
+  try {
+    processSandboxWebhook({
+      idToken: body.idToken, paymentIntentId: exp.intentId, provider: "SANDBOX-PJP",
+      providerEventId: "EVT-228-EXP-" + stamp, eventType: "PAYMENT_SUCCEEDED",
+      providerReference: "REF-228-EXP-" + stamp, payloadHash: "HASH-228-EXP-" + stamp,
+      amount: amount, targetStatus: "SUCCEEDED", signatureValid: true
+    });
+  } catch (e) {
+    webhookRejected = true; webhookReason = String(e.message || e);
+  }
+  addCheck("Late webhook after expiration blocked", webhookRejected, webhookReason);
+
+  const expFinalDoc = getDocument("payment_intents", exp.intentId);
+  const expFinal = decodeFirestoreFields(expFinalDoc.fields || {});
+  const expTxs = listDocuments("transactions", 500).filter(function(x){return String(x.data.payment_intent_id||"")===exp.intentId;});
+  const expPays = listDocuments("payments", 500).filter(function(x){return String(x.data.payment_intent_id||"")===exp.intentId;});
+  const expTickets = listDocuments("tickets", 500).filter(function(x){return String(x.data.payment_intent_id||"")===exp.intentId;});
+  addCheck("Expired intent remains EXPIRED", String(expFinal.status||"") === "EXPIRED", expFinal.status);
+  addCheck("Expired intent has no PAID transaction", expTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+expTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  addCheck("Expired intent has no PAID payment", expPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+expPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  addCheck("Expired intent has no ACTIVE ticket", expTickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length===0, "ACTIVE="+expTickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length);
+
+  const cancelTransition = transitionPaymentIntentLifecycle_(cancel.intentId, "CANCELLED", "SANDBOX_CANCEL_TEST", false);
+  addCheck("Cancel transition accepted", cancelTransition.success && cancelTransition.status === "CANCELLED", cancelTransition.message);
+
+  let cancelPaymentRejected = false, cancelPaymentReason = "";
+  try {
+    processSandboxPayment({
+      idToken: body.idToken, paymentIntentId: cancel.intentId, eventId: eventId,
+      userId: userId, amount: amount, outcome: "SUCCESS"
+    });
+  } catch (e) {
+    cancelPaymentRejected = true; cancelPaymentReason = String(e.message || e);
+  }
+  addCheck("Cancelled intent blocks payment", cancelPaymentRejected, cancelPaymentReason);
+
+  let cancelWebhookRejected = false, cancelWebhookReason = "";
+  try {
+    processSandboxWebhook({
+      idToken: body.idToken, paymentIntentId: cancel.intentId, provider: "SANDBOX-PJP",
+      providerEventId: "EVT-228-CAN-" + stamp, eventType: "PAYMENT_SUCCEEDED",
+      providerReference: "REF-228-CAN-" + stamp, payloadHash: "HASH-228-CAN-" + stamp,
+      amount: amount, targetStatus: "SUCCEEDED", signatureValid: true
+    });
+  } catch (e) {
+    cancelWebhookRejected = true; cancelWebhookReason = String(e.message || e);
+  }
+  addCheck("Webhook after cancellation blocked", cancelWebhookRejected, cancelWebhookReason);
+
+  const canFinalDoc = getDocument("payment_intents", cancel.intentId);
+  const canFinal = decodeFirestoreFields(canFinalDoc.fields || {});
+  const canTxs = listDocuments("transactions", 500).filter(function(x){return String(x.data.payment_intent_id||"")===cancel.intentId;});
+  const canPays = listDocuments("payments", 500).filter(function(x){return String(x.data.payment_intent_id||"")===cancel.intentId;});
+  const canTickets = listDocuments("tickets", 500).filter(function(x){return String(x.data.payment_intent_id||"")===cancel.intentId;});
+  addCheck("Cancelled intent remains CANCELLED", String(canFinal.status||"") === "CANCELLED", canFinal.status);
+  addCheck("Cancelled intent has no PAID transaction", canTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+canTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  addCheck("Cancelled intent has no PAID payment", canPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+canPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  addCheck("Cancelled intent has no ACTIVE ticket", canTickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length===0, "ACTIVE="+canTickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length);
+
+  // Idempotent lifecycle repeats must not mutate the terminal state.
+  const expRepeat = transitionPaymentIntentLifecycle_(exp.intentId, "EXPIRED", "SANDBOX_EXPIRED_REPEAT", false);
+  const canRepeat = transitionPaymentIntentLifecycle_(cancel.intentId, "CANCELLED", "SANDBOX_CANCEL_REPEAT", false);
+  addCheck("Repeated EXPIRED transition idempotent", expRepeat.success && expRepeat.idempotent === true && expRepeat.status === "EXPIRED", expRepeat.message);
+  addCheck("Repeated CANCELLED transition idempotent", canRepeat.success && canRepeat.idempotent === true && canRepeat.status === "CANCELLED", canRepeat.message);
+
+  const passCount = checks.filter(function(x){return x.pass;}).length;
+  const failCount = checks.length - passCount;
+  return {
+    success: failCount === 0, environment:"SANDBOX", production:false, liveBankCalled:false,
+    test:"PAYMENT_INTENT_EXPIRATION_CANCELLATION", passCount:passCount, failCount:failCount,
+    checked:checks.length, overall:failCount===0?"PASS":"FAIL",
+    expiredIntentId:exp.intentId, cancelledIntentId:cancel.intentId, checks:checks,
+    message:failCount===0
+      ? "Payment Intent lifecycle PASS: expiration/cancellation memblokir payment dan webhook, tanpa transaction/payment/ticket PAID/ACTIVE."
+      : "Payment Intent lifecycle menemukan kegagalan. Periksa checks.",
+    timestamp:new Date().toISOString()
+  };
+}
+
 function processCreatePaymentIntent(body) {
   if (!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser = verifyFirebaseIdToken(body.idToken);
@@ -1884,7 +2110,8 @@ function processCreatePaymentIntent(body) {
     created_by: str(authUser.uid),
     created_by_backend: boolean(true),
     created_at: timestamp(now),
-    updated_at: timestamp(now)
+    updated_at: timestamp(now),
+    expires_at: timestamp(new Date(Date.now() + getPaymentIntentExpirationMinutes_() * 60000).toISOString())
   });
 
   return {
@@ -1955,6 +2182,9 @@ function processSandboxPayment(body) {
     }
     if (!["REQUIRES_PAYMENT", "PROCESSING"].includes(String(existingIntentData.status || ""))) {
       throw new Error("Payment Intent tidak berada pada status yang dapat diproses: " + existingIntentData.status);
+    }
+    if (isPaymentIntentExpired_(existingIntentData)) {
+      throw new Error("Payment Intent sudah expired dan tidak dapat dibayar.");
     }
   }
 
