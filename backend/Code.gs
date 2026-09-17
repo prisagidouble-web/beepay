@@ -1,5 +1,5 @@
 /**
- * BeePay Backend - Phase 22.2.1
+ * BeePay Backend - Phase 22.3.0
  * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
  *
  * IMPORTANT:
@@ -9,7 +9,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.2.0";
+const BEEPAY_VERSION = "22.3.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -32,16 +32,30 @@ function doPost(e) {
   try {
     const body = parseRequestBody(e);
     if (body.action === "sandbox_payment") {
-      return jsonResponse(processSandboxPayment(body));
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxPayment(body);
+      }));
     }
     if (body.action === "sandbox_audit") {
       return jsonResponse(processSandboxAudit(body));
     }
     if (body.action === "create_payment_intent") {
-      return jsonResponse(processCreatePaymentIntent(body));
+      return jsonResponse(withScriptLock(function() {
+        return processCreatePaymentIntent(body);
+      }));
     }
     if (body.action === "sandbox_create_order") {
-      return jsonResponse(processSandboxCreateOrder(body));
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxCreateOrder(body);
+      }));
+    }
+    if (body.action === "sandbox_binding_audit") {
+      return jsonResponse(processSandboxBindingAudit(body));
+    }
+    if (body.action === "sandbox_idempotency_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxIdempotencyTest(body);
+      }));
     }
     return jsonResponse({
       success: false,
@@ -58,6 +72,21 @@ function doPost(e) {
 }
 
 
+
+/**
+ * Serialize trusted payment writes inside Apps Script.
+ * This prevents two simultaneous browser/webhook requests from passing
+ * the same pre-write checks at the same time.
+ */
+function withScriptLock(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 /**
  * READ-ONLY Sandbox E2E audit.
@@ -331,6 +360,165 @@ function decodeFirestoreFields(fields) {
  * tests a real order document that can be consumed by create_payment_intent.
  * No production order is created or modified.
  */
+/**
+ * READ-ONLY audit for Payment Intent -> Transaction -> Payment -> Ticket.
+ * It verifies that a completed sandbox SUCCESS run remains bound to exactly
+ * one transaction/payment/ticket and that the core identity fields match.
+ */
+function processSandboxBindingAudit(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const intentId = String(body.paymentIntentId || "").trim();
+  if (!intentId) throw new Error("Payment Intent ID wajib.");
+
+  const intentDoc = getDocument("payment_intents", intentId);
+  if (!intentDoc || !intentDoc.fields) {
+    throw new Error("Payment Intent tidak ditemukan: " + intentId);
+  }
+  const intent = decodeFirestoreFields(intentDoc.fields || {});
+
+  const transactions = listDocuments("transactions", 500).filter(function(item) {
+    return String(item.data.payment_intent_id || "") === intentId;
+  });
+  const payments = listDocuments("payments", 500).filter(function(item) {
+    return String(item.data.payment_intent_id || "") === intentId;
+  });
+  const tickets = listDocuments("tickets", 500).filter(function(item) {
+    return String(item.data.payment_intent_id || "") === intentId;
+  });
+
+  const checks = [];
+  function check(name, pass, detail) {
+    checks.push({name:name, pass:!!pass, detail:String(detail || "")});
+  }
+
+  check("Intent SANDBOX trusted", intent.production === false && intent.trusted === true && intent.created_by_backend === true,
+    "production=false, trusted=true, created_by_backend=true");
+  check("Intent terminal SUCCESS", String(intent.status || "") === "SUCCEEDED",
+    "status=" + String(intent.status || "-"));
+  check("Exactly one PAID transaction", transactions.filter(function(x){return String(x.data.status || "") === "PAID";}).length === 1,
+    "PAID transactions=" + transactions.filter(function(x){return String(x.data.status || "") === "PAID";}).length);
+  check("Transaction identity matches Intent",
+    transactions.filter(function(x){
+      const d=x.data||{};
+      return String(d.status||"") === "PAID" &&
+        String(d.order_id||"") === String(intent.order_id||"") &&
+        String(d.event_id||"") === String(intent.event_id||"") &&
+        String(d.user_id||"") === String(intent.user_id||"") &&
+        Number(d.amount) === Number(intent.amount) &&
+        String(d.currency||"").toUpperCase() === "IDR" &&
+        d.production === false && d.trusted === true;
+    }).length === 1,
+    "order/event/user/amount/currency/trust cocok");
+  check("Exactly one PAID payment", payments.filter(function(x){return String(x.data.status || "") === "PAID";}).length === 1,
+    "PAID payments=" + payments.filter(function(x){return String(x.data.status || "") === "PAID";}).length);
+  check("Payment binds to transaction", payments.filter(function(x){
+      return String(x.data.status||"") === "PAID" &&
+        transactions.some(function(t){return String(t.data.transaction_id||t.id) === String(x.data.transaction_id||"");});
+    }).length === 1,
+    "payment.transaction_id harus menunjuk transaction yang ada");
+  check("Exactly one ACTIVE ticket", tickets.filter(function(x){return String(x.data.status || "") === "ACTIVE";}).length === 1,
+    "ACTIVE tickets=" + tickets.filter(function(x){return String(x.data.status || "") === "ACTIVE";}).length);
+  check("Ticket binds to PAID transaction", tickets.filter(function(x){
+      const d=x.data||{};
+      return String(d.status||"") === "ACTIVE" &&
+        transactions.some(function(t){
+          return String(t.data.transaction_id||t.id) === String(d.transaction_id||"") &&
+                 String(t.data.status||"") === "PAID";
+        }) &&
+        String(d.order_id||"") === String(intent.order_id||"") &&
+        String(d.event_id||"") === String(intent.event_id||"") &&
+        String(d.user_id||"") === String(intent.user_id||"") &&
+        d.production === false && d.activated_by_backend === true;
+    }).length === 1,
+    "ticket order/event/user/transaction/trust cocok");
+
+  const passCount = checks.filter(function(c){return c.pass;}).length;
+  const failCount = checks.length - passCount;
+
+  return {
+    success: true,
+    environment: "SANDBOX",
+    readOnly: true,
+    paymentIntentId: intentId,
+    orderId: String(intent.order_id || ""),
+    status: String(intent.status || ""),
+    passCount: passCount,
+    failCount: failCount,
+    checked: checks.length,
+    overall: failCount === 0 ? "PASS" : "FAIL",
+    checks: checks,
+    counts: {
+      transactions: transactions.length,
+      payments: payments.length,
+      tickets: tickets.length
+    },
+    message: failCount === 0
+      ? "Binding Payment Intent → Transaction → Payment → Ticket valid."
+      : "Binding audit menemukan ketidaksesuaian. Periksa detail checks.",
+    timestamp: new Date().toISOString()
+  };
+}
+
+/**
+ * Controlled sandbox idempotency test.
+ * It uses one fixed SANDBOX idempotency key and calls the same trusted
+ * Payment Intent creation logic twice. The second call must return the
+ * first intent rather than create a second one.
+ */
+function processSandboxIdempotencyTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const orderId = "ORDER-SBX-001";
+  const eventId = "EVENT-002";
+  const amount = 100000;
+  const key = "SBX-IDEMP-" + orderId + "-V1";
+
+  const request = {
+    idToken: body.idToken,
+    orderId: orderId,
+    eventId: eventId,
+    amount: amount,
+    channel: "QRIS",
+    clientReference: "PHASE-22.3-IDEMPOTENCY",
+    idempotencyKey: key
+  };
+
+  const first = processCreatePaymentIntent(request);
+  const second = processCreatePaymentIntent(request);
+
+  const sameId = String(first.paymentIntentId || "") === String(second.paymentIntentId || "");
+  const secondExisting = second.existing === true;
+  const pass = !!first.success && !!second.success && sameId && secondExisting;
+
+  return {
+    success: pass,
+    environment: "SANDBOX",
+    production: false,
+    test: "PAYMENT_INTENT_IDEMPOTENCY",
+    idempotencyKey: key,
+    firstPaymentIntentId: String(first.paymentIntentId || ""),
+    secondPaymentIntentId: String(second.paymentIntentId || ""),
+    samePaymentIntent: sameId,
+    secondReturnedExisting: secondExisting,
+    overall: pass ? "PASS" : "FAIL",
+    message: pass
+      ? "Idempotency PASS: dua request dengan key yang sama menghasilkan satu Payment Intent."
+      : "Idempotency FAIL: periksa hasil test dan data Payment Intent.",
+    timestamp: new Date().toISOString()
+  };
+}
+
 function processSandboxCreateOrder(body) {
   if (!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser = verifyFirebaseIdToken(body.idToken);
@@ -580,6 +768,67 @@ function processSandboxPayment(body) {
     }
   }
 
+  // Idempotency guard: one Payment Intent may produce only one terminal
+  // SUCCESS transaction. Repeated SUCCESS calls return the existing result
+  // instead of creating another transaction/payment/ticket.
+  if (suppliedIntentId && outcome === "SUCCESS") {
+    const existingTx = listDocuments("transactions", 500).find(function(item) {
+      return String(item.data.payment_intent_id || "") === suppliedIntentId &&
+             String(item.data.status || "").toUpperCase() === "PAID";
+    });
+    if (existingTx) {
+      const txData = existingTx.data || {};
+      const existingTicket = listDocuments("tickets", 500).find(function(item) {
+        return String(item.data.payment_intent_id || "") === suppliedIntentId &&
+               String(item.data.transaction_id || "") === String(txData.transaction_id || existingTx.id) &&
+               String(item.data.status || "").toUpperCase() === "ACTIVE";
+      });
+      return {
+        success: true,
+        existing: true,
+        idempotent: true,
+        environment: "SANDBOX",
+        liveBankCalled: false,
+        outcome: "SUCCESS",
+        sandboxRunId: String(txData.sandbox_run_id || ""),
+        paymentIntentId: suppliedIntentId,
+        transactionId: String(txData.transaction_id || existingTx.id),
+        orderId: String(txData.order_id || existingIntentData.order_id || ""),
+        ticketId: existingTicket ? String(existingTicket.data.ticket_id || existingTicket.id) : null,
+        ticketStatus: existingTicket ? "ACTIVE" : null,
+        message: "Payment Intent sudah berhasil diproses sebelumnya. Tidak dibuat transaction/payment/ticket duplikat.",
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+
+  // PENDING is also idempotent for the same Payment Intent: once a pending
+  // transaction exists, a repeated PENDING call returns that transaction.
+  if (suppliedIntentId && outcome === "PENDING") {
+    const existingPending = listDocuments("transactions", 500).find(function(item) {
+      return String(item.data.payment_intent_id || "") === suppliedIntentId &&
+             String(item.data.status || "").toUpperCase() === "PENDING";
+    });
+    if (existingPending) {
+      return {
+        success: true,
+        existing: true,
+        idempotent: true,
+        environment: "SANDBOX",
+        liveBankCalled: false,
+        outcome: "PENDING",
+        sandboxRunId: String(existingPending.data.sandbox_run_id || ""),
+        paymentIntentId: suppliedIntentId,
+        transactionId: String(existingPending.data.transaction_id || existingPending.id),
+        orderId: String(existingPending.data.order_id || existingIntentData.order_id || ""),
+        ticketId: null,
+        ticketStatus: null,
+        message: "Payment Intent masih PENDING dan transaction yang sama digunakan kembali.",
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+
   const now = new Date().toISOString();
   const stamp = Date.now();
   const runId = `SBX-${stamp}`;
@@ -635,6 +884,7 @@ function processSandboxPayment(body) {
   if (outcome === "SUCCESS") {
     createDocument("transactions", txId, {
       transaction_id: str(txId),
+      sandbox_run_id: str(runId),
       order_id: str(orderId),
       payment_intent_id: str(intentId),
       event_id: str(eventId),
@@ -700,6 +950,7 @@ function processSandboxPayment(body) {
   } else if (outcome === "PENDING") {
     createDocument("transactions", txId, {
       transaction_id: str(txId),
+      sandbox_run_id: str(runId),
       order_id: str(orderId),
       payment_intent_id: str(intentId),
       event_id: str(eventId),
