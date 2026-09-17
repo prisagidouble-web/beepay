@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.2.1",
+version:"22.3.0",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -21,6 +21,7 @@ document.getElementById("logoutButton").hidden=!yes;
 document.getElementById("rolePanel").hidden=!yes;
 document.getElementById("paymentProcessing").hidden=!yes;
 if(document.getElementById("sandboxOrderPanel"))document.getElementById("sandboxOrderPanel").hidden=!yes;
+if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;
 if(!yes){document.getElementById("authMessage").textContent="Belum login.";return}
 try{
   const snap=await getDoc(doc(db,"admin_users",u.uid));
@@ -65,7 +66,7 @@ try{
 }
 },
 async logout(){if(auth)await signOut(auth)},
-bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()});document.getElementById("sandboxOrderBtn")?.addEventListener("click",()=>this.createSandboxOrder())},
+bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()});document.getElementById("sandboxOrderBtn")?.addEventListener("click",()=>this.createSandboxOrder());document.getElementById("bindingAuditBtn")?.addEventListener("click",()=>this.runBindingAudit());document.getElementById("idempotencyTestBtn")?.addEventListener("click",()=>this.runIdempotencyTest())},
 bindCheckout(){document.getElementById("checkoutForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createCheckout()})},
 bindWebhook(){document.getElementById("webhookForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createWebhookLedger()})},
 bindVerification(){document.getElementById("verificationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createVerificationRecord()})},
@@ -134,6 +135,36 @@ if(!intentId||!pmId||!eventId){m.textContent="Payment Intent ID, Payment Method 
 const id=`CHK-${Date.now()}`,data={checkout_session_id:id,payment_intent_id:intentId,payment_method_id:pmId,event_id:eventId,status:"READY_FOR_PAYMENT",provider_session_reference:null,created_by:currentUser.uid,created_at:serverTimestamp(),updated_at:serverTimestamp()};
 try{await addDoc(collection(db,"checkout_sessions"),data);document.getElementById("checkoutForm").reset();m.textContent=`Checkout ${id} siap. Belum ada konfirmasi pembayaran.`;await this.loadCheckouts()}catch(e){m.textContent="Gagal membuat checkout: "+e.message}},
 async loadCheckouts(){const list=document.getElementById("checkoutList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"checkout_sessions"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada checkout session.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.checkout_session_id||"-")}</h3><div class="meta">Intent: ${this.escape(x.payment_intent_id||"-")} · Event: ${this.escape(x.event_id||"-")}</div></div><span class="status">${this.escape(x.status||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Checkout belum dapat dibaca.</div>'}},
+async runBindingAudit(){
+const m=document.getElementById("bindingAuditMessage");
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+const intentId=(document.getElementById("bindingAuditIntentId")?.value||"").trim();
+if(!intentId){m.textContent="Payment Intent ID wajib diisi.";return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+m.textContent="Memeriksa binding Payment Intent → Transaction → Payment → Ticket...";
+try{
+  const idToken=await currentUser.getIdToken(true);
+  const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_binding_audit",idToken,paymentIntentId:intentId})});
+  const result=await response.json();
+  if(!result.success && result.overall!=="FAIL")throw new Error(result.error||"Binding audit gagal.");
+  const details=(result.checks||[]).map(c=>`${c.pass?"PASS":"FAIL"}: ${c.name}`).join(" · ");
+  m.textContent=`Binding Audit ${result.overall} · PASS ${result.passCount} · FAIL ${result.failCount}. ${details}`;
+}catch(e){console.error(e);m.textContent="Binding audit gagal: "+e.message}
+},
+async runIdempotencyTest(){
+const m=document.getElementById("idempotencyTestMessage");
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+m.textContent="Menjalankan test idempotency Payment Intent...";
+try{
+  const idToken=await currentUser.getIdToken(true);
+  const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_idempotency_test",idToken})});
+  const result=await response.json();
+  if(!result.success)throw new Error(result.error||"Idempotency test gagal.");
+  m.textContent=`Idempotency ${result.overall}: ${result.message} PI pertama=${result.firstPaymentIntentId} · PI kedua=${result.secondPaymentIntentId}`;
+  await this.loadIntents();
+}catch(e){console.error(e);m.textContent="Idempotency test gagal: "+e.message}
+},
 async createSandboxOrder(){
 const m=document.getElementById("sandboxOrderMessage");
 if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
@@ -174,6 +205,7 @@ try{
   const result=await response.json();
   if(!result.success)throw new Error(result.error||"Gagal membuat Payment Intent.");
   document.getElementById("intentForm").reset();
+  if(document.getElementById("bindingAuditIntentId"))document.getElementById("bindingAuditIntentId").value=result.paymentIntentId||"";
   m.textContent=`Payment Intent ${result.paymentIntentId} ${result.existing?"sudah ada":"berhasil dibuat"}. Status: ${result.status}. ${result.message||""}`;
   await this.loadIntents();
 }catch(e){console.error(e);m.textContent="Gagal membuat intent: "+e.message}},
