@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 22.3.0</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 22.4.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -34,6 +34,24 @@
 </div>
 <div id="bindingAuditMessage" class="message"></div>
 <div id="idempotencyTestMessage" class="message"></div>
+</section>
+<section id="webhookLifecyclePanel" class="panel" hidden>
+<div class="section-heading"><h2>Payment Lifecycle &amp; Webhook Simulation</h2><p>Simulasi callback provider melalui trusted backend. Menguji PROCESSING, SUCCEEDED, duplicate webhook, out-of-order status, dan webhook invalid tanpa bank/PJP live.</p></div>
+<form id="webhookSimulationForm" class="form-grid">
+<input id="webhookSimulationIntentId" required placeholder="Payment Intent ID">
+<input id="webhookSimulationProvider" required value="SANDBOX-PJP" placeholder="Provider">
+<input id="webhookSimulationEventId" required placeholder="Provider Event ID">
+<select id="webhookSimulationEventType"><option value="PAYMENT_PROCESSING">PAYMENT_PROCESSING</option><option value="PAYMENT_SUCCEEDED">PAYMENT_SUCCEEDED</option><option value="PAYMENT_FAILED">PAYMENT_FAILED</option></select>
+<input id="webhookSimulationReference" required placeholder="Provider Reference">
+<input id="webhookSimulationHash" required placeholder="Payload Hash">
+<input id="webhookSimulationAmount" required type="number" min="1" step="1" placeholder="Amount IDR">
+<select id="webhookSimulationStatus"><option value="PROCESSING">PROCESSING</option><option value="SUCCEEDED">SUCCEEDED</option><option value="FAILED">FAILED</option></select>
+<select id="webhookSimulationSignature"><option value="VALID">Signature VALID</option><option value="INVALID">Signature INVALID</option></select>
+<button type="submit">Simulate Webhook</button>
+<button id="webhookLifecycleTestBtn" type="button">Run Lifecycle Test</button>
+</form>
+<div id="webhookSimulationMessage" class="message"></div>
+<div id="webhookLifecycleTestMessage" class="message"></div>
 </section>
 <section id="paymentProcessing" class="panel" hidden>
 <div class="section-heading"><h2>Payment Intent</h2><p>Membuat payment intent yang aman untuk satu order. Belum terhubung ke bank/PJP live.</p></div>
