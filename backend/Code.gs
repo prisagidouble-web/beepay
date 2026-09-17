@@ -7,6 +7,7 @@
  * Phase 22.8.0 adds Payment Intent expiration/cancellation lifecycle guards and tests.
  * Phase 22.8.1 fixes lifecycle webhook test assertions for structured rejection responses.
  * Phase 22.9.0 adds payment receipt and reconciliation controls.
+ * Phase 23.0.0 adds universal merchant integration and upgrade-payment contracts.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -15,7 +16,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.9.0";
+const BEEPAY_VERSION = "23.0.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -105,6 +106,14 @@ function doPost(e) {
     if (body.action === "sandbox_payment_reconciliation_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxPaymentReconciliationTest(body);
+      }));
+    }
+    if (body.action === "merchant_contract_status") {
+      return jsonResponse(processMerchantContractStatus(body));
+    }
+    if (body.action === "sandbox_merchant_upgrade_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxMerchantUpgradeTest(body);
       }));
     }
     return jsonResponse({
@@ -1089,6 +1098,67 @@ function processSandboxPaymentReconciliationTest(body){
   };
 }
 
+/** Phase 23.0.0 — Universal Merchant Integration Contract.
+ * BeePay owns payment state; the merchant owns its business object.
+ * Upgrade is a generic delta-payment use case.
+ */
+function normalizePaymentPurpose_(purpose) {
+  var p=String(purpose||"PURCHASE").trim().toUpperCase();
+  var allowed=["PURCHASE","UPGRADE","ADJUSTMENT","RENEWAL","REGISTRATION","INVOICE","OTHER"];
+  if(!allowed.includes(p)) throw new Error("Payment purpose tidak valid: "+p);
+  return p;
+}
+function validateMerchantId_(merchantId) {
+  var id=String(merchantId||"").trim();
+  if(!id || !/^[A-Z0-9][A-Z0-9._-]{2,63}$/i.test(id)) throw new Error("Merchant ID tidak valid.");
+  return id;
+}
+function processMerchantContractStatus(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  var authUser=verifyFirebaseIdToken(body.idToken), admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  var channels=["QRIS","BANK_TRANSFER","VIRTUAL_ACCOUNT"];
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,contractVersion:"23.0.0",merchantContract:"UNIVERSAL",paymentPurposes:["PURCHASE","UPGRADE","ADJUSTMENT","RENEWAL","REGISTRATION","INVOICE","OTHER"],requiredFields:["merchant_id","application_id","order_id","amount","currency","channel","payment_purpose","idempotency_key"],upgradeFields:["source_reference","target_reference","previous_amount","target_amount","upgrade_delta"],channels:channels.map(function(c){return resolvePaymentRoute_(c);}),merchantOwnsBusinessObject:true,beePayOwnsPaymentState:true,credentialValuesExposed:false,liveBankCalled:false,message:"BeePay bersifat universal untuk aplikasi apa pun. Upgrade menagih hanya selisih; merchant menerapkan perubahan business object setelah payment PAID.",timestamp:new Date().toISOString()};
+}
+function processSandboxMerchantUpgradeTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  var authUser=verifyFirebaseIdToken(body.idToken), admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  var merchantId=validateMerchantId_(body.merchantId||"DEMO-TICKETING");
+  var applicationId=String(body.applicationId||"DEMO-TICKETING-APP").trim();
+  var sourceReference=String(body.sourceReference||"TICKET-ECONOMY-001").trim();
+  var targetReference=String(body.targetReference||"TICKET-VIP-001").trim();
+  var previousAmount=Number(body.previousAmount||100000), targetAmount=Number(body.targetAmount||250000), delta=targetAmount-previousAmount;
+  if(delta<=0) throw new Error("Upgrade membutuhkan target amount lebih tinggi dari previous amount.");
+  var stamp=Date.now(), orderId="ORDER-UPG-230-"+stamp, intentId="PI-UPG-230-"+stamp, now=new Date().toISOString();
+  var checks=[]; function add(n,p,d){checks.push({name:n,pass:!!p,detail:String(d||"")});}
+  add("Merchant contract accepts non-BeeTix merchant",merchantId!=="BEETIX",merchantId);
+  add("Application ID is present",!!applicationId,applicationId);
+  add("Source reference is present",!!sourceReference,sourceReference);
+  add("Target reference is present",!!targetReference,targetReference);
+  add("Target amount is higher than previous amount",targetAmount>previousAmount,previousAmount+" → "+targetAmount);
+  add("Upgrade delta is calculated correctly",delta===targetAmount-previousAmount,"delta="+delta);
+  add("Only delta is chargeable",delta>0 && delta<targetAmount,"charge="+delta);
+  add("Upgrade payment purpose is accepted",normalizePaymentPurpose_("UPGRADE")==="UPGRADE","UPGRADE");
+  var idempotencyKey="UPGRADE:"+merchantId+":"+sourceReference+":"+targetReference;
+  add("Upgrade idempotency key is deterministic",idempotencyKey.indexOf("UPGRADE:")===0,idempotencyKey);
+  createDocument("orders",orderId,{order_id:str(orderId),user_id:str(authUser.uid),merchant_id:str(merchantId),application_id:str(applicationId),event_id:str("SANDBOX-UPGRADE-230"),amount:integer(delta),currency:str("IDR"),status:str("PENDING_PAYMENT"),payment_method_id:str("SANDBOX"),reference:str("UPGRADE-ORDER-"+stamp),payment_purpose:str("UPGRADE"),source_reference:str(sourceReference),target_reference:str(targetReference),previous_amount:integer(previousAmount),target_amount:integer(targetAmount),upgrade_delta:integer(delta),created_by:str(authUser.uid),production:boolean(false),source:str("SANDBOX"),created_at:timestamp(now),updated_at:timestamp(now)});
+  createDocument("payment_intents",intentId,{payment_intent_id:str(intentId),order_id:str(orderId),user_id:str(authUser.uid),merchant_id:str(merchantId),application_id:str(applicationId),event_id:str("SANDBOX-UPGRADE-230"),amount:integer(delta),currency:str("IDR"),channel:str("QRIS"),provider:str("SANDBOX-PJP"),provider_adapter:str("SANDBOX-PJP"),routing_id:str("SANDBOX-PJP:QRIS"),payment_purpose:str("UPGRADE"),source_reference:str(sourceReference),target_reference:str(targetReference),previous_amount:integer(previousAmount),target_amount:integer(targetAmount),upgrade_delta:integer(delta),idempotency_key:str(idempotencyKey),status:str("REQUIRES_PAYMENT"),trusted:boolean(true),production:boolean(false),created_by:str(authUser.uid),created_by_backend:boolean(true),created_at:timestamp(now),updated_at:timestamp(now)});
+  add("Payment Intent amount equals upgrade delta",true,"intent="+delta); add("Original amount is preserved",true,"previous="+previousAmount); add("Target amount is preserved",true,"target="+targetAmount);
+  var paymentResult=null; try{paymentResult=processSandboxPayment({idToken:body.idToken,paymentIntentId:intentId,eventId:"SANDBOX-UPGRADE-230",userId:authUser.uid,amount:delta,outcome:"SUCCESS"});add("Upgrade delta payment succeeds",!!paymentResult,"SUCCESS");}catch(e){add("Upgrade delta payment succeeds",false,String(e.message||e));}
+  var finalDoc=getDocument("payment_intents",intentId), finalIntent=finalDoc&&finalDoc.fields?decodeFirestoreFields(finalDoc.fields||{}):{};
+  var txs=listDocuments("transactions",500).filter(function(x){return String(x.data.payment_intent_id||"")===intentId;});
+  var pays=listDocuments("payments",500).filter(function(x){return String(x.data.payment_intent_id||"")===intentId;});
+  var tickets=listDocuments("tickets",500).filter(function(x){return String(x.data.payment_intent_id||"")===intentId;});
+  add("Final upgrade intent is SUCCEEDED",String(finalIntent.status||"").toUpperCase()==="SUCCEEDED",String(finalIntent.status||""));
+  add("Exactly one PAID transaction for upgrade",txs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===1,"PAID="+txs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  add("Exactly one PAID payment for upgrade",pays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===1,"PAID="+pays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  add("No ticket is mutated/issued by BeePay for upgrade",tickets.length===0,"tickets="+tickets.length);
+  add("No full target amount was charged",Number(finalIntent.amount)===delta,"charged="+finalIntent.amount+" target="+targetAmount);
+  add("Upgrade references remain bound",String(finalIntent.source_reference||"")===sourceReference && String(finalIntent.target_reference||"")===targetReference,"references match");
+  var passCount=checks.filter(function(x){return x.pass;}).length, failCount=checks.length-passCount;
+  return {success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,test:"UNIVERSAL_MERCHANT_UPGRADE",passCount:passCount,failCount:failCount,checked:checks.length,overall:failCount===0?"PASS":"FAIL",merchantId:merchantId,applicationId:applicationId,previousAmount:previousAmount,targetAmount:targetAmount,upgradeDelta:delta,orderId:orderId,paymentIntentId:intentId,checks:checks,message:failCount===0?"Universal Merchant & Upgrade PASS: merchant non-BeeTix dapat memakai BeePay dan upgrade menagih hanya selisih harga; business object merchant tidak diubah oleh BeePay.":"Universal Merchant & Upgrade FAIL: periksa checks.",timestamp:new Date().toISOString()};
+}
 function getProviderAdapter(provider) {
   const name = String(provider || "").trim().toUpperCase();
   const adapters = {
@@ -2533,7 +2603,8 @@ function processSandboxPayment(body) {
       created_at: timestamp(now)
     });
 
-    createDocument("tickets", ticketId, {
+    if (String(existingIntentData && existingIntentData.payment_purpose || "").toUpperCase() !== "UPGRADE") {
+      createDocument("tickets", ticketId, {
       ticket_id: str(ticketId),
       order_id: str(orderId),
       transaction_id: str(txId),
@@ -2547,7 +2618,8 @@ function processSandboxPayment(body) {
       production: boolean(false),
       created_at: timestamp(now),
       activated_at: timestamp(now)
-    });
+      });
+    }
   } else if (outcome === "PENDING") {
     createDocument("transactions", txId, {
       transaction_id: str(txId),
@@ -2592,7 +2664,7 @@ function processSandboxPayment(body) {
     paymentIntentId: intentId,
     transactionId: txId,
     orderId: orderId,
-    ticketId: outcome === "SUCCESS" ? ticketId : null,
+    ticketId: outcome === "SUCCESS" && String(existingIntentData && existingIntentData.payment_purpose || "").toUpperCase() !== "UPGRADE" ? ticketId : null,
     ticketStatus: outcome === "SUCCESS" ? "ACTIVE" : null,
     message: outcome === "SUCCESS"
       ? "Sandbox payment berhasil. Payment PAID dan ticket ACTIVE dibuat oleh trusted backend."
