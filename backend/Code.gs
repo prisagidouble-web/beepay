@@ -1,6 +1,7 @@
 /**
  * BeePay Backend - Phase 22.4.0
  * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
+ * Phase 22.5.0 adds provider adapter boundaries and server-side webhook signature simulation.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -9,7 +10,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.4.0";
+const BEEPAY_VERSION = "22.5.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -65,6 +66,11 @@ function doPost(e) {
     if (body.action === "sandbox_webhook_lifecycle_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxWebhookLifecycleTest(body);
+      }));
+    }
+    if (body.action === "sandbox_provider_adapter_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxProviderAdapterTest(body);
       }));
     }
     return jsonResponse({
@@ -537,6 +543,252 @@ function processSandboxIdempotencyTest(body) {
  * Provider event IDs are idempotent, terminal states are monotonic, and a
  * successful callback reuses an existing PENDING transaction when present.
  */
+
+/**
+ * Phase 22.5.0 — Provider Adapter boundary.
+ * Provider-specific rules stay outside the payment core.
+ * SANDBOX-PJP is the only enabled adapter in this phase.
+ */
+function getProviderAdapter(provider) {
+  const name = String(provider || "").trim().toUpperCase();
+  const adapters = {
+    "SANDBOX-PJP": {
+      provider: "SANDBOX-PJP",
+      environment: "SANDBOX",
+      enabled: true,
+      live: false,
+      signatureAlgorithm: "SHA-256",
+      supportedEvents: {
+        PAYMENT_PROCESSING: "PROCESSING",
+        PAYMENT_SUCCEEDED: "SUCCEEDED",
+        PAYMENT_FAILED: "FAILED"
+      }
+    }
+  };
+  return adapters[name] || null;
+}
+
+function bytesToHex_(bytes) {
+  return bytes.map(function(b) {
+    const n = b < 0 ? b + 256 : b;
+    return ("0" + n.toString(16)).slice(-2);
+  }).join("");
+}
+
+function computeSandboxProviderSignature_(payload) {
+  const adapter = getProviderAdapter("SANDBOX-PJP");
+  if (!adapter || !adapter.enabled || adapter.live) throw new Error("Sandbox provider adapter tidak tersedia.");
+  const canonical = [
+    payload.provider, payload.providerEventId, payload.paymentIntentId,
+    payload.providerReference, payload.amount, payload.currency,
+    payload.eventType, payload.targetStatus, payload.payloadHash
+  ].join("|");
+  return bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256, canonical, Utilities.Charset.UTF_8
+  ));
+}
+
+function processSandboxAdapterWebhook(body) {
+  const provider = requiredText(body.provider, "Provider").toUpperCase();
+  const adapter = getProviderAdapter(provider);
+  if (!adapter || adapter.live || adapter.environment !== "SANDBOX") {
+    throw new Error("Provider adapter tidak diizinkan pada SANDBOX: " + provider);
+  }
+
+  const paymentIntentId = requiredText(body.paymentIntentId, "Payment Intent ID");
+  const providerEventId = requiredText(body.providerEventId, "Provider Event ID");
+  const providerReference = requiredText(body.providerReference, "Provider Reference");
+  const payloadHash = requiredText(body.payloadHash, "Payload Hash");
+  const eventType = requiredText(body.eventType, "Event Type").toUpperCase();
+  const targetStatus = requiredText(body.targetStatus, "Target Status").toUpperCase();
+  const currency = String(body.currency || "IDR").trim().toUpperCase();
+  const amount = Number(body.amount);
+  const signature = String(body.signature || "").trim().toLowerCase();
+
+  if (!adapter.supportedEvents[eventType] || adapter.supportedEvents[eventType] !== targetStatus) {
+    throw new Error("Event mapping provider tidak valid.");
+  }
+  if (currency !== "IDR") throw new Error("Currency provider sandbox harus IDR.");
+  if (!Number.isSafeInteger(amount) || amount < 1) throw new Error("Amount provider harus berupa bilangan IDR yang valid.");
+  if (!signature) throw new Error("Signature provider wajib diisi.");
+
+  const expected = computeSandboxProviderSignature_({
+    provider: provider,
+    providerEventId: providerEventId,
+    paymentIntentId: paymentIntentId,
+    providerReference: providerReference,
+    amount: amount,
+    currency: currency,
+    eventType: eventType,
+    targetStatus: targetStatus,
+    payloadHash: payloadHash
+  });
+
+  if (signature !== expected) {
+    return {
+      success: false, rejected: true, environment: "SANDBOX", production: false,
+      provider: provider, providerEventId: providerEventId,
+      paymentIntentId: paymentIntentId, reason: "INVALID_SIGNATURE",
+      message: "Signature provider tidak valid. Payment state tidak diubah.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  return processSandboxWebhook({
+    idToken: body.idToken,
+    paymentIntentId: paymentIntentId,
+    provider: provider,
+    providerEventId: providerEventId,
+    eventType: eventType,
+    providerReference: providerReference,
+    payloadHash: payloadHash,
+    amount: amount,
+    currency: currency,
+    targetStatus: targetStatus,
+    signatureValid: true
+  });
+}
+
+function processSandboxProviderAdapterTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+
+  const provider = "SANDBOX-PJP";
+  const adapter = getProviderAdapter(provider);
+  const stamp = Date.now();
+  const orderId = "ORDER-SBX-ADAPTER-" + stamp;
+  const eventId = "EVENT-002";
+  const userId = "TEST-USER-002";
+  const amount = 100000;
+
+  processSandboxCreateOrder({
+    idToken: body.idToken, orderId: orderId, eventId: eventId, userId: userId, amount: amount
+  });
+  const intent = processCreatePaymentIntent({
+    idToken: body.idToken, orderId: orderId, eventId: eventId, amount: amount,
+    channel: "QRIS", clientReference: "PHASE-22.5-ADAPTER",
+    idempotencyKey: "PHASE-22.5-ADAPTER-" + stamp
+  });
+  const intentId = String(intent.paymentIntentId || "");
+  const reference = "ADP-REF-" + stamp;
+  const hash = "ADP-HASH-" + stamp;
+  const checks = [];
+  function addCheck(name, pass, detail) {
+    checks.push({name:name, pass:!!pass, detail:String(detail || "")});
+  }
+
+  addCheck("Adapter SANDBOX-PJP registered", !!adapter && adapter.enabled === true && adapter.live === false,
+    adapter ? "environment=" + adapter.environment : "missing");
+  addCheck("Adapter never calls live bank", !!adapter && adapter.live === false,
+    adapter ? "live=" + adapter.live : "missing");
+  addCheck("Event mapping PROCESSING", !!adapter && adapter.supportedEvents.PAYMENT_PROCESSING === "PROCESSING",
+    adapter ? adapter.supportedEvents.PAYMENT_PROCESSING : "missing");
+  addCheck("Event mapping SUCCEEDED", !!adapter && adapter.supportedEvents.PAYMENT_SUCCEEDED === "SUCCEEDED",
+    adapter ? adapter.supportedEvents.PAYMENT_SUCCEEDED : "missing");
+
+  const base = {
+    idToken: body.idToken, paymentIntentId: intentId, provider: provider,
+    providerEventId: "ADP-EVT-" + stamp + "-P", eventType: "PAYMENT_PROCESSING",
+    providerReference: reference + "-P", payloadHash: hash + "-P",
+    amount: amount, currency: "IDR", targetStatus: "PROCESSING"
+  };
+  const validSig = computeSandboxProviderSignature_(base);
+  const processing = processSandboxAdapterWebhook(Object.assign({}, base, {signature:validSig}));
+  addCheck("Valid signature accepted", processing.success && processing.targetStatus === "PROCESSING", processing.message);
+
+  const duplicate = processSandboxAdapterWebhook(Object.assign({}, base, {signature:validSig}));
+  addCheck("Duplicate provider event idempotent", duplicate.success && duplicate.idempotent === true, duplicate.message);
+
+  const invalidBase = Object.assign({}, base, {
+    providerEventId: "ADP-EVT-" + stamp + "-INVALID",
+    providerReference: reference + "-INVALID", payloadHash: hash + "-INVALID"
+  });
+  const invalid = processSandboxAdapterWebhook(Object.assign({}, invalidBase, {signature:"00"}));
+  addCheck("Invalid signature rejected", invalid.rejected === true && invalid.reason === "INVALID_SIGNATURE", invalid.message);
+
+  const badAmount = Object.assign({}, base, {
+    providerEventId: "ADP-EVT-" + stamp + "-AMOUNT",
+    providerReference: reference + "-AMOUNT", payloadHash: hash + "-AMOUNT", amount: amount + 1
+  });
+  let amountRejected = false, amountDetail = "";
+  try { processSandboxAdapterWebhook(Object.assign({}, badAmount, {signature:computeSandboxProviderSignature_(badAmount)})); }
+  catch (err) { amountDetail = String(err.message || err); amountRejected = amountDetail.indexOf("Nominal webhook tidak sesuai Payment Intent") >= 0; }
+  addCheck("Amount mismatch rejected", amountRejected, amountDetail || "unexpected acceptance");
+
+  const badCurrency = Object.assign({}, base, {
+    providerEventId: "ADP-EVT-" + stamp + "-CUR",
+    providerReference: reference + "-CUR", payloadHash: hash + "-CUR", currency: "USD"
+  });
+  let currencyRejected = false, currencyDetail = "";
+  try { processSandboxAdapterWebhook(Object.assign({}, badCurrency, {signature:computeSandboxProviderSignature_(badCurrency)})); }
+  catch (err) { currencyDetail = String(err.message || err); currencyRejected = currencyDetail.indexOf("Currency provider sandbox harus IDR") >= 0; }
+  addCheck("Currency mismatch rejected", currencyRejected, currencyDetail || "unexpected acceptance");
+
+  const badMapping = Object.assign({}, base, {
+    providerEventId: "ADP-EVT-" + stamp + "-MAP",
+    providerReference: reference + "-MAP", payloadHash: hash + "-MAP",
+    eventType: "PAYMENT_SUCCEEDED", targetStatus: "PROCESSING"
+  });
+  let mappingRejected = false, mappingDetail = "";
+  try { processSandboxAdapterWebhook(Object.assign({}, badMapping, {signature:computeSandboxProviderSignature_(badMapping)})); }
+  catch (err) { mappingDetail = String(err.message || err); mappingRejected = mappingDetail.indexOf("Event mapping provider tidak valid") >= 0; }
+  addCheck("Invalid event mapping rejected", mappingRejected, mappingDetail || "unexpected acceptance");
+
+  const successBase = {
+    idToken: body.idToken, paymentIntentId: intentId, provider: provider,
+    providerEventId: "ADP-EVT-" + stamp + "-S", eventType: "PAYMENT_SUCCEEDED",
+    providerReference: reference + "-S", payloadHash: hash + "-S",
+    amount: amount, currency: "IDR", targetStatus: "SUCCEEDED"
+  };
+  const succeeded = processSandboxAdapterWebhook(Object.assign({}, successBase, {
+    signature:computeSandboxProviderSignature_(successBase)
+  }));
+  addCheck("Valid SUCCEEDED callback accepted",
+    succeeded.success && succeeded.targetStatus === "SUCCEEDED" && !!succeeded.transactionId, succeeded.message);
+
+  const duplicateSuccess = processSandboxAdapterWebhook(Object.assign({}, successBase, {
+    signature:computeSandboxProviderSignature_(successBase)
+  }));
+  addCheck("Duplicate SUCCEEDED idempotent", duplicateSuccess.success && duplicateSuccess.idempotent === true, duplicateSuccess.message);
+
+  let unsupportedRejected = false, unsupportedDetail = "";
+  try {
+    processSandboxAdapterWebhook(Object.assign({}, successBase, {provider:"LIVE-BANK-UNSUPPORTED"}));
+  } catch (err) { unsupportedDetail = String(err.message || err); unsupportedRejected = unsupportedDetail.indexOf("Provider adapter tidak diizinkan") >= 0; }
+  addCheck("Unsupported/live adapter rejected", unsupportedRejected, unsupportedDetail || "unexpected acceptance");
+
+  const finalIntentDoc = getDocument("payment_intents", intentId);
+  const finalIntent = finalIntentDoc ? decodeFirestoreFields(finalIntentDoc.fields || {}) : {};
+  const txs = listDocuments("transactions", 500).filter(function(x) {
+    return String(x.data.payment_intent_id || "") === intentId && String(x.data.status || "").toUpperCase() === "PAID";
+  });
+  const pays = listDocuments("payments", 500).filter(function(x) {
+    return String(x.data.payment_intent_id || "") === intentId && String(x.data.status || "").toUpperCase() === "PAID";
+  });
+  const tickets = listDocuments("tickets", 500).filter(function(x) {
+    return String(x.data.payment_intent_id || "") === intentId && String(x.data.status || "").toUpperCase() === "ACTIVE";
+  });
+  addCheck("Final intent SUCCEEDED", String(finalIntent.status || "") === "SUCCEEDED", "status=" + String(finalIntent.status || "-"));
+  addCheck("Exactly one PAID transaction", txs.length === 1, "PAID transactions=" + txs.length);
+  addCheck("Exactly one PAID payment", pays.length === 1, "PAID payments=" + pays.length);
+  addCheck("Exactly one ACTIVE ticket", tickets.length === 1, "ACTIVE tickets=" + tickets.length);
+
+  const passCount = checks.filter(function(x){return x.pass;}).length;
+  const failCount = checks.length - passCount;
+  return {
+    success: failCount === 0, environment: "SANDBOX", production: false, liveBankCalled: false,
+    provider: provider, paymentIntentId: intentId, orderId: orderId,
+    passCount: passCount, failCount: failCount, checked: checks.length,
+    overall: failCount === 0 ? "PASS" : "FAIL", checks: checks,
+    message: failCount === 0
+      ? "Provider Adapter Security PASS: adapter SANDBOX-PJP, signature validation, event mapping, mismatch rejection, webhook idempotency, dan payment effects aman."
+      : "Provider Adapter Security FAIL: periksa checks.",
+    timestamp: new Date().toISOString()
+  };
+}
+
 function processSandboxWebhook(body) {
   if (!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser = verifyFirebaseIdToken(body.idToken);
@@ -551,6 +803,7 @@ function processSandboxWebhook(body) {
   const eventType = requiredText(body.eventType, "Event Type").toUpperCase();
   const providerReference = requiredText(body.providerReference, "Provider Reference");
   const payloadHash = requiredText(body.payloadHash, "Payload Hash");
+  const currency = String(body.currency || "IDR").trim().toUpperCase();
   const amount = Number(body.amount);
   const targetStatus = requiredText(body.targetStatus, "Target Status").toUpperCase();
   const signatureValid = body.signatureValid === true;
@@ -566,6 +819,9 @@ function processSandboxWebhook(body) {
   }
   if (!Number.isSafeInteger(amount) || amount < 1) {
     throw new Error("Amount harus berupa bilangan IDR yang valid.");
+  }
+  if (currency !== "IDR") {
+    throw new Error("Currency webhook harus IDR.");
   }
 
   const intentDoc = getDocument("payment_intents", paymentIntentId);
