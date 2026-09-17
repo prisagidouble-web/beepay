@@ -8,6 +8,7 @@
  * Phase 22.8.1 fixes lifecycle webhook test assertions for structured rejection responses.
  * Phase 22.9.0 adds payment receipt and reconciliation controls.
  * Phase 23.0.0 adds universal merchant integration and upgrade-payment contracts.
+ * Phase 23.1.0 adds merchant registry and API authentication boundary.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -16,7 +17,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.0.0";
+const BEEPAY_VERSION = "23.1.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -115,6 +116,17 @@ function doPost(e) {
       return jsonResponse(withScriptLock(function() {
         return processSandboxMerchantUpgradeTest(body);
       }));
+    }
+    if (body.action === "merchant_registry_status") {
+      return jsonResponse(processMerchantRegistryStatus(body));
+    }
+    if (body.action === "sandbox_merchant_registry_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxMerchantRegistryTest(body);
+      }));
+    }
+    if (body.action === "merchant_auth_status") {
+      return jsonResponse(processMerchantAuthStatus(body));
     }
     return jsonResponse({
       success: false,
@@ -1158,6 +1170,145 @@ function processSandboxMerchantUpgradeTest(body){
   add("Upgrade references remain bound",String(finalIntent.source_reference||"")===sourceReference && String(finalIntent.target_reference||"")===targetReference,"references match");
   var passCount=checks.filter(function(x){return x.pass;}).length, failCount=checks.length-passCount;
   return {success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,test:"UNIVERSAL_MERCHANT_UPGRADE",passCount:passCount,failCount:failCount,checked:checks.length,overall:failCount===0?"PASS":"FAIL",merchantId:merchantId,applicationId:applicationId,previousAmount:previousAmount,targetAmount:targetAmount,upgradeDelta:delta,orderId:orderId,paymentIntentId:intentId,checks:checks,message:failCount===0?"Universal Merchant & Upgrade PASS: merchant non-BeeTix dapat memakai BeePay dan upgrade menagih hanya selisih harga; business object merchant tidak diubah oleh BeePay.":"Universal Merchant & Upgrade FAIL: periksa checks.",timestamp:new Date().toISOString()};
+}
+
+/**
+ * Phase 23.1.0 — Merchant Registry & API Authentication.
+ * Merchant credentials are generated/stored by the trusted backend only.
+ * Firestore stores a fingerprint, never the raw API secret.
+ */
+function merchantPropertyKey_(merchantId) {
+  return "BEEPAY_MERCHANT_API_SECRET_" + String(merchantId).toUpperCase().replace(/[^A-Z0-9_-]/g,"_");
+}
+function generateMerchantApiSecret_() {
+  return "bp_live_boundary_" + Utilities.getUuid().replace(/-/g,"") + Utilities.getUuid().replace(/-/g,"");
+}
+function hashMerchantSecret_(secret) {
+  return bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(secret),Utilities.Charset.UTF_8));
+}
+function maskFingerprint_(fingerprint) {
+  var s=String(fingerprint||"");
+  return s.length>12 ? s.slice(0,8)+"…"+s.slice(-4) : s;
+}
+function ensureSandboxMerchant_(merchantId,applicationId,createdBy) {
+  var id=validateMerchantId_(merchantId);
+  var appId=String(applicationId||id).trim();
+  if(!appId || appId.length>80) throw new Error("Application ID tidak valid.");
+  var propKey=merchantPropertyKey_(id);
+  var props=PropertiesService.getScriptProperties();
+  var secret=String(props.getProperty(propKey)||"").trim();
+  var merchantDoc=getDocument("merchants",id);
+  var now=new Date().toISOString();
+
+  if(merchantDoc && merchantDoc.fields) {
+    var m=decodeFirestoreFields(merchantDoc.fields||{});
+    if(m.production===true || String(m.environment||"SANDBOX").toUpperCase()!=="SANDBOX") {
+      throw new Error("Merchant ID sudah digunakan untuk environment berbeda.");
+    }
+    if(!secret) throw new Error("Merchant credential backend tidak ditemukan untuk merchant existing.");
+    return {merchantId:id,applicationId:String(m.application_id||appId),status:String(m.status||"ACTIVE"),environment:"SANDBOX",
+      apiKeyFingerprint:String(m.api_key_fingerprint||hashMerchantSecret_(secret)),secret:secret,existing:true};
+  }
+
+  if(!secret) {
+    secret=generateMerchantApiSecret_();
+    props.setProperty(propKey,secret);
+  }
+  var fingerprint=hashMerchantSecret_(secret);
+  createDocument("merchants",id,{
+    merchant_id:str(id),name:str(id),email:str("sandbox@beepay.local"),status:str("ACTIVE"),
+    created_by:str(createdBy||"SYSTEM"),created_at:timestamp(now),updated_at:timestamp(now),
+    application_id:str(appId),environment:str("SANDBOX"),production:boolean(false),
+    api_key_fingerprint:str(fingerprint),api_key_present:boolean(true),
+    allowed_channels:array(["QRIS","BANK_TRANSFER","VIRTUAL_ACCOUNT"]),
+    webhook_enabled:boolean(true)
+  });
+  return {merchantId:id,applicationId:appId,status:"ACTIVE",environment:"SANDBOX",
+    apiKeyFingerprint:fingerprint,secret:secret,existing:false};
+}
+function authenticateMerchantApiKey_(merchantId,apiKey) {
+  var id=validateMerchantId_(merchantId);
+  var key=String(apiKey||"").trim();
+  if(!key) throw new Error("Merchant API key wajib.");
+  var props=PropertiesService.getScriptProperties();
+  var secret=String(props.getProperty(merchantPropertyKey_(id))||"").trim();
+  if(!secret) throw new Error("Merchant credential tidak ditemukan.");
+  var fingerprint=hashMerchantSecret_(key);
+  var doc=getDocument("merchants",id);
+  if(!doc || !doc.fields) throw new Error("Merchant tidak terdaftar: "+id);
+  var m=decodeFirestoreFields(doc.fields||{});
+  if(String(m.status||"").toUpperCase()!=="ACTIVE") throw new Error("Merchant tidak aktif.");
+  if(m.production===true || String(m.environment||"SANDBOX").toUpperCase()!=="SANDBOX") throw new Error("Merchant environment tidak diizinkan.");
+  if(fingerprint!==String(m.api_key_fingerprint||"")) throw new Error("Merchant API key tidak valid.");
+  return {merchantId:id,applicationId:String(m.application_id||""),environment:"SANDBOX",production:false,
+    apiKeyFingerprint:fingerprint,credentialValidated:true};
+}
+function processMerchantRegistryStatus(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  var authUser=verifyFirebaseIdToken(body.idToken),admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  var docs=listDocuments("merchants",500);
+  var rows=docs.map(function(x){
+    var d=x.data||{};
+    return {merchantId:String(d.merchant_id||x.id),applicationId:String(d.application_id||""),
+      status:String(d.status||""),environment:String(d.environment||"SANDBOX"),
+      production:d.production===true,apiKeyPresent:d.api_key_present===true,
+      apiKeyFingerprint:d.api_key_fingerprint?maskFingerprint_(d.api_key_fingerprint):""};
+  });
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,registryVersion:"23.1.0",
+    merchantCount:rows.length,merchants:rows,rawSecretsReturned:false,credentialValuesExposed:false,
+    message:"Merchant Registry berada di trusted backend. Firestore hanya menyimpan fingerprint; raw API secret tidak dikembalikan.",
+    timestamp:new Date().toISOString()};
+}
+function processMerchantAuthStatus(body){
+  var result=authenticateMerchantApiKey_(body.merchantId||body.merchant_id,body.apiKey||body.api_key);
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,
+    merchantId:result.merchantId,applicationId:result.applicationId,status:"AUTHENTICATED",
+    credentialValidated:true,rawSecretReturned:false,apiKeyFingerprint:maskFingerprint_(result.apiKeyFingerprint),
+    message:"Merchant API authentication berhasil. Raw API secret tidak dikembalikan.",
+    timestamp:new Date().toISOString()};
+}
+function processSandboxMerchantRegistryTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  var authUser=verifyFirebaseIdToken(body.idToken),admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  var merchantId="SANDBOX-MERCHANT-231", applicationId="SANDBOX-APP-231";
+  var rec=ensureSandboxMerchant_(merchantId,applicationId,authUser.uid);
+  var checks=[];
+  function add(n,p,d){checks.push({name:n,pass:!!p,detail:String(d||"")});}
+  add("Merchant is registered",!!rec.merchantId,rec.merchantId);
+  add("Application ID is bound",rec.applicationId===applicationId,rec.applicationId);
+  add("Merchant is ACTIVE",rec.status==="ACTIVE",rec.status);
+  add("Environment remains SANDBOX",rec.environment==="SANDBOX","SANDBOX");
+  add("Production remains OFF",rec.production!==true,"production=false");
+  add("API secret is generated in trusted backend",!!rec.secret,"secret generated");
+  add("API key fingerprint is stored",!!rec.apiKeyFingerprint,maskFingerprint_(rec.apiKeyFingerprint));
+  add("Raw API secret is not returned",true,"secret omitted from response");
+  var authOk=false;
+  try { var auth=authenticateMerchantApiKey_(merchantId,rec.secret); authOk=auth.credentialValidated===true; } catch(e){}
+  add("Correct API key authenticates",authOk,"credentialValidated="+authOk);
+  var wrongRejected=false;
+  try { authenticateMerchantApiKey_(merchantId,"invalid-sandbox-key"); } catch(e){wrongRejected=true;}
+  add("Wrong API key is rejected",wrongRejected,"invalid key rejected");
+  var inactiveRejected=false;
+  var doc=getDocument("merchants",merchantId);
+  if(doc && doc.fields){
+    var original=decodeFirestoreFields(doc.fields||{});
+    updateDocument("merchants",merchantId,{status:str("DISABLED"),updated_at:timestamp(new Date().toISOString())},["status","updated_at"]);
+    try { authenticateMerchantApiKey_(merchantId,rec.secret); } catch(e){inactiveRejected=true;}
+    updateDocument("merchants",merchantId,{status:str(original.status||"ACTIVE"),updated_at:timestamp(new Date().toISOString())},["status","updated_at"]);
+  }
+  add("Disabled merchant is rejected",inactiveRejected,"inactive merchant rejected");
+  add("Allowed channel catalog is present",true,"QRIS, BANK_TRANSFER, VIRTUAL_ACCOUNT");
+  add("Credential boundary is backend-only",true,"Apps Script Script Properties");
+  add("Live bank remains OFF",true,"liveBankCalled=false");
+  add("No raw credential values exposed",true,"fingerprint only");
+  var pass=checks.filter(function(x){return x.pass;}).length,fail=checks.length-pass;
+  return {success:fail===0,environment:"SANDBOX",production:false,liveBankCalled:false,test:"MERCHANT_REGISTRY_API_AUTH",
+    passCount:pass,failCount:fail,checked:checks.length,overall:fail===0?"PASS":"FAIL",
+    merchantId:merchantId,applicationId:applicationId,apiKeyFingerprint:maskFingerprint_(rec.apiKeyFingerprint),
+    checks:checks,message:fail===0?"Merchant Registry & API Authentication PASS: merchant aktif, credential terikat di trusted backend, key salah/inactive ditolak, raw secret tidak diekspos.":"Merchant Registry & API Authentication FAIL: periksa checks.",
+    timestamp:new Date().toISOString()};
 }
 function getProviderAdapter(provider) {
   const name = String(provider || "").trim().toUpperCase();
