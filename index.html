@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 21</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 22.2.1</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -18,6 +18,13 @@
 <div id="rolePanel" class="role-panel" hidden><strong id="adminName"></strong><span id="adminRole"></span></div>
 </section>
 <section class="system-status"><div class="status-card"><span class="status-label">System</span><span id="systemStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">API</span><span id="apiStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">Firebase</span><span id="firebaseStatus" class="status-value">Checking...</span></div></section>
+<section id="sandboxOrderPanel" class="panel" hidden>
+<div class="section-heading"><h2>Sandbox Order Fixture</h2><p>Membuat order khusus SANDBOX melalui trusted backend agar dapat dipakai untuk test Payment Intent. Tidak membuat order production.</p></div>
+<div class="form-grid">
+<button id="sandboxOrderBtn" type="button">Create Sandbox Order</button>
+</div>
+<div id="sandboxOrderMessage" class="message"></div>
+</section>
 <section id="paymentProcessing" class="panel" hidden>
 <div class="section-heading"><h2>Payment Intent</h2><p>Membuat payment intent yang aman untuk satu order. Belum terhubung ke bank/PJP live.</p></div>
 <form id="intentForm" class="form-grid">
