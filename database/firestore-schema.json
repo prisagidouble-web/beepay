@@ -1,5 +1,5 @@
 {
-  "version": "22.6.0",
+  "version": "22.7.0",
   "collections": {
     "admins": {
       "fields": [
@@ -140,7 +140,10 @@
         "trusted",
         "production",
         "created_by_backend",
-        "last_sandbox_run_id"
+        "last_sandbox_run_id",
+        "provider",
+        "provider_adapter",
+        "routing_id"
       ]
     },
     "payments": {
@@ -373,6 +376,19 @@
         "checks",
         "payment_intent_id",
         "created_at"
+      ]
+    },
+    "payment_channel_routes": {
+      "fields": [
+        "routing_id",
+        "channel",
+        "provider",
+        "provider_adapter",
+        "environment",
+        "enabled",
+        "live",
+        "created_at",
+        "updated_at"
       ]
     }
   },
