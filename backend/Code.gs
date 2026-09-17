@@ -9,7 +9,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "21.4.0";
+const BEEPAY_VERSION = "22.2.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -457,12 +457,41 @@ function processSandboxPayment(body) {
     throw new Error("Amount harus berupa bilangan IDR yang valid.");
   }
 
+  // Phase 22.2: sandbox payment may now consume an existing trusted
+  // Payment Intent created by create_payment_intent. The old standalone
+  // sandbox mode remains available when paymentIntentId is omitted.
+  const suppliedIntentId = String(body.paymentIntentId || "").trim();
+  let existingIntent = null;
+  let existingIntentData = null;
+  if (suppliedIntentId) {
+    existingIntent = getDocument("payment_intents", suppliedIntentId);
+    if (!existingIntent || !existingIntent.fields) {
+      throw new Error("Payment Intent tidak ditemukan: " + suppliedIntentId);
+    }
+    existingIntentData = decodeFirestoreFields(existingIntent.fields || {});
+    if (existingIntentData.production !== false || existingIntentData.trusted !== true || existingIntentData.created_by_backend !== true) {
+      throw new Error("Payment Intent bukan intent sandbox trusted backend.");
+    }
+    if (String(existingIntentData.event_id || "") !== eventId) {
+      throw new Error("Event ID tidak sesuai dengan Payment Intent.");
+    }
+    if (String(existingIntentData.user_id || "") !== userId) {
+      throw new Error("User ID tidak sesuai dengan Payment Intent.");
+    }
+    if (Number(existingIntentData.amount) !== amount) {
+      throw new Error("Nominal tidak sesuai dengan Payment Intent.");
+    }
+    if (!["REQUIRES_PAYMENT", "PROCESSING"].includes(String(existingIntentData.status || ""))) {
+      throw new Error("Payment Intent tidak berada pada status yang dapat diproses: " + existingIntentData.status);
+    }
+  }
+
   const now = new Date().toISOString();
   const stamp = Date.now();
   const runId = `SBX-${stamp}`;
   const txId = `SBX-TX-${stamp}`;
-  const intentId = `SBX-PI-${stamp}`;
-  const orderId = `SBX-ORD-${stamp}`;
+  const intentId = suppliedIntentId || `SBX-PI-${stamp}`;
+  const orderId = suppliedIntentId ? String(existingIntentData.order_id || "") : `SBX-ORD-${stamp}`;
   const ref = `SANDBOX-${stamp}`;
   const ticketId = `TKT-${stamp}`;
 
@@ -483,23 +512,31 @@ function processSandboxPayment(body) {
     created_at: timestamp(now)
   });
 
-  // Create the payment intent in a trusted state.
-  createDocument("payment_intents", intentId, {
-    payment_intent_id: str(intentId),
-    order_id: str(orderId),
-    event_id: str(eventId),
-    user_id: str(userId),
-    amount: integer(amount),
-    currency: str("IDR"),
-    channel: str("SANDBOX"),
-    idempotency_key: str(`SANDBOX:${ref}`),
-    status: str(outcome === "SUCCESS" ? "SUCCEEDED" : outcome === "PENDING" ? "PROCESSING" : "FAILED"),
-    trusted: boolean(true),
-    production: boolean(false),
-    created_by_backend: boolean(true),
-    created_at: timestamp(now),
-    updated_at: timestamp(now)
-  });
+  // Create or advance the Payment Intent in a trusted backend operation.
+  if (suppliedIntentId) {
+    updateDocument("payment_intents", intentId, {
+      status: str(outcome === "SUCCESS" ? "SUCCEEDED" : outcome === "PENDING" ? "PROCESSING" : "FAILED"),
+      updated_at: timestamp(now),
+      last_sandbox_run_id: str(runId)
+    }, ["status", "updated_at", "last_sandbox_run_id"]);
+  } else {
+    createDocument("payment_intents", intentId, {
+      payment_intent_id: str(intentId),
+      order_id: str(orderId),
+      event_id: str(eventId),
+      user_id: str(userId),
+      amount: integer(amount),
+      currency: str("IDR"),
+      channel: str("SANDBOX"),
+      idempotency_key: str(`SANDBOX:${ref}`),
+      status: str(outcome === "SUCCESS" ? "SUCCEEDED" : outcome === "PENDING" ? "PROCESSING" : "FAILED"),
+      trusted: boolean(true),
+      production: boolean(false),
+      created_by_backend: boolean(true),
+      created_at: timestamp(now),
+      updated_at: timestamp(now)
+    });
+  }
 
   if (outcome === "SUCCESS") {
     createDocument("transactions", txId, {
@@ -668,6 +705,14 @@ function firestoreRequest(url, method, body) {
     throw new Error(`Firestore API ${code}: ${text.substring(0, 500)}`);
   }
   return JSON.parse(text);
+}
+
+function updateDocument(collection, documentId, fields, fieldPaths) {
+  const paths = (fieldPaths || Object.keys(fields || {})).map(function(path) {
+    return "updateMask.fieldPaths=" + encodeURIComponent(path);
+  }).join("&");
+  const url = `${DB_ROOT}/${collection}/${encodeURIComponent(documentId)}${paths ? "?" + paths : ""}`;
+  return firestoreRequest(url, "patch", {fields: fields});
 }
 
 function requiredText(value, label) {
