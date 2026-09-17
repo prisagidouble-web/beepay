@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 23.1.1</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 23.2.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -70,6 +70,11 @@
 </div>
 <div id="merchantRegistryStatusMessage" class="message"></div>
 <div id="merchantRegistryTestMessage" class="message"></div>
+</section>
+<section id="universalPaymentApiPanel" class="panel" hidden>
+<div class="section-heading"><h2>Universal Merchant Payment API</h2><p>Kontrak API pembayaran universal untuk aplikasi apa pun. Merchant diautentikasi menggunakan credential registry di trusted backend; Order divalidasi terhadap merchant/application/nominal; Payment Intent dibuat dengan idempotency. Fase ini SANDBOX.</p></div>
+<div class="form-grid"><button id="universalPaymentApiTestBtn" type="button">Run Universal Payment API Test</button></div>
+<div id="universalPaymentApiTestMessage" class="message"></div>
 </section>
 <section id="merchantContractPanel" class="panel" hidden>
 <div class="section-heading"><h2>Universal Merchant Integration &amp; Upgrade</h2><p>BeePay dapat dipakai oleh aplikasi apa pun. Mendukung PURCHASE, UPGRADE, ADJUSTMENT, RENEWAL, REGISTRATION, INVOICE, dan OTHER. Upgrade menagih hanya selisih harga; perubahan business object dilakukan oleh merchant setelah payment PAID.</p></div>
