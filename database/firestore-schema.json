@@ -89,7 +89,9 @@
         "reference",
         "created_by",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "production",
+        "source"
       ]
     },
     "transactions": {
@@ -106,7 +108,14 @@
         "reference",
         "created_by",
         "created_at",
-        "paid_at"
+        "paid_at",
+        "payment_intent_id",
+        "channel",
+        "provider_reference",
+        "trusted",
+        "production",
+        "updated_at",
+        "sandbox_run_id"
       ]
     },
     "payment_intents": {
@@ -127,7 +136,11 @@
         "expires_at",
         "created_by",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "trusted",
+        "production",
+        "created_by_backend",
+        "last_sandbox_run_id"
       ]
     },
     "payments": {
@@ -140,7 +153,14 @@
         "provider_reference",
         "status",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "event_id",
+        "user_id",
+        "amount",
+        "currency",
+        "trusted",
+        "production",
+        "verified_by_backend"
       ]
     },
     "settlements": {
@@ -184,7 +204,10 @@
         "qr_token",
         "activated_by_backend",
         "created_at",
-        "activated_at"
+        "activated_at",
+        "payment_intent_id",
+        "production",
+        "activation_source"
       ]
     },
     "checkout_sessions": {
