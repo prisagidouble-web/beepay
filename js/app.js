@@ -4,8 +4,8 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.8.1",
-async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
+version:"22.9.0",
+async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
 bindAuth(){
@@ -21,7 +21,7 @@ document.getElementById("logoutButton").hidden=!yes;
 document.getElementById("rolePanel").hidden=!yes;
 document.getElementById("paymentProcessing").hidden=!yes;
 if(document.getElementById("sandboxOrderPanel"))document.getElementById("sandboxOrderPanel").hidden=!yes;
-if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;if(document.getElementById("paymentRoutingPanel"))document.getElementById("paymentRoutingPanel").hidden=!yes;if(document.getElementById("paymentIntentLifecyclePanel"))document.getElementById("paymentIntentLifecyclePanel").hidden=!yes;
+if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;if(document.getElementById("paymentRoutingPanel"))document.getElementById("paymentRoutingPanel").hidden=!yes;if(document.getElementById("paymentReconciliationPanel"))document.getElementById("paymentReconciliationPanel").hidden=!yes;if(document.getElementById("paymentIntentLifecyclePanel"))document.getElementById("paymentIntentLifecyclePanel").hidden=!yes;
 if(!yes){document.getElementById("authMessage").textContent="Belum login.";return}
 try{
   const snap=await getDoc(doc(db,"admin_users",u.uid));
@@ -69,7 +69,7 @@ async logout(){if(auth)await signOut(auth)},
 bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()});document.getElementById("sandboxOrderBtn")?.addEventListener("click",()=>this.createSandboxOrder());document.getElementById("bindingAuditBtn")?.addEventListener("click",()=>this.runBindingAudit());document.getElementById("idempotencyTestBtn")?.addEventListener("click",()=>this.runIdempotencyTest())},
 bindCheckout(){document.getElementById("checkoutForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createCheckout()})},
 bindWebhook(){document.getElementById("webhookForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createWebhookLedger()})},bindWebhookSimulation(){document.getElementById("webhookSimulationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runWebhookSimulation()});document.getElementById("webhookLifecycleTestBtn")?.addEventListener("click",()=>this.runWebhookLifecycleTest())},bindProviderAdapter(){document.getElementById("providerAdapterTestBtn")?.addEventListener("click",()=>this.runProviderAdapterTest())},
-bindProviderConfig(){document.getElementById("providerConfigStatusBtn")?.addEventListener("click",()=>this.loadProviderConfigStatus());document.getElementById("providerConfigTestBtn")?.addEventListener("click",()=>this.runProviderConfigTest())},bindPaymentRouting(){document.getElementById("paymentRoutingStatusBtn")?.addEventListener("click",()=>this.loadPaymentRoutingStatus());document.getElementById("paymentRoutingTestBtn")?.addEventListener("click",()=>this.runPaymentRoutingTest())},bindPaymentIntentLifecycle(){document.getElementById("paymentIntentLifecycleTestBtn")?.addEventListener("click",()=>this.runPaymentIntentLifecycleTest())},
+bindProviderConfig(){document.getElementById("providerConfigStatusBtn")?.addEventListener("click",()=>this.loadProviderConfigStatus());document.getElementById("providerConfigTestBtn")?.addEventListener("click",()=>this.runProviderConfigTest())},bindPaymentRouting(){document.getElementById("paymentRoutingStatusBtn")?.addEventListener("click",()=>this.loadPaymentRoutingStatus());document.getElementById("paymentRoutingTestBtn")?.addEventListener("click",()=>this.runPaymentRoutingTest())},bindPaymentReconciliation(){document.getElementById("paymentReconciliationStatusBtn")?.addEventListener("click",()=>this.loadPaymentReconciliationStatus());document.getElementById("paymentReconciliationTestBtn")?.addEventListener("click",()=>this.runPaymentReconciliationTest())},bindPaymentIntentLifecycle(){document.getElementById("paymentIntentLifecycleTestBtn")?.addEventListener("click",()=>this.runPaymentIntentLifecycleTest())},
 bindVerification(){document.getElementById("verificationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createVerificationRecord()})},
 bindResult(){document.getElementById("resultForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createResultRecord()})},
 bindTicket(){document.getElementById("ticketForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createTicketRecord()})},
@@ -237,6 +237,32 @@ m.textContent=`Payment Intent Lifecycle ${result.overall}: PASS ${result.passCou
 }catch(e){console.error(e);m.textContent="Payment Intent Lifecycle Test gagal: "+e.message}
 },
 
+async loadPaymentReconciliationStatus(){
+const m=document.getElementById("paymentReconciliationStatusMessage");
+const id=document.getElementById("paymentReconciliationIntentId")?.value.trim();
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!id){m.textContent="Masukkan Payment Intent ID.";return}
+try{
+const idToken=await currentUser.getIdToken(true);
+const r=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"payment_reconciliation_status",idToken,paymentIntentId:id})});
+const x=await r.json(); if(!x.success)throw new Error(x.error||"Gagal membaca reconciliation.");
+m.textContent=`Intent ${x.paymentIntentId} · Status ${x.status} · Transaction ${x.transactionCount} · Payment ${x.paymentCount} · Receipt ${x.receiptCount} · Reconciled ${x.reconciled?"YES":"NO"}.`;
+}catch(e){console.error(e);m.textContent="Reconciliation status gagal: "+e.message}
+},
+async runPaymentReconciliationTest(){
+const m=document.getElementById("paymentReconciliationTestMessage");
+const id=document.getElementById("paymentReconciliationIntentId")?.value.trim();
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!id){m.textContent="Masukkan Payment Intent ID SUCCESS yang sudah memiliki PAID transaction/payment.";return}
+m.textContent="Menjalankan Payment Receipt & Reconciliation Test...";
+try{
+const idToken=await currentUser.getIdToken(true);
+const r=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_payment_reconciliation_test",idToken,paymentIntentId:id})});
+const x=await r.json();
+const detail=(x.checks||[]).map(c=>`${c.pass?"PASS":"FAIL"}: ${c.name}${c.detail?` (${c.detail})`:""}`).join(" · ");
+m.textContent=`Payment Receipt & Reconciliation ${x.overall||"FAIL"}: PASS ${x.passCount||0} · FAIL ${x.failCount||0}. ${x.message||x.error||""} ${detail}`;
+}catch(e){console.error(e);m.textContent="Payment Receipt & Reconciliation Test gagal: "+e.message}
+},
 async runProviderAdapterTest(){
 const m=document.getElementById("providerAdapterTestMessage");
 if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
