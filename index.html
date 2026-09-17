@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 22.7.0</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 22.8.0</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -52,6 +52,15 @@
 </form>
 <div id="webhookSimulationMessage" class="message"></div>
 <div id="webhookLifecycleTestMessage" class="message"></div>
+</section>
+<section id="paymentIntentLifecyclePanel" class="panel" hidden>
+<div class="section-heading"><h2>Payment Intent Lifecycle & Expiration</h2><p>Menguji expiration, cancellation, late payment, late webhook, dan idempotent terminal state. Fase ini tetap SANDBOX.</p></div>
+<div class="form-grid">
+<input value="30 minutes default" readonly placeholder="Expiration">
+<input value="EXPIRED / CANCELLED" readonly placeholder="Terminal lifecycle">
+<button id="paymentIntentLifecycleTestBtn" type="button">Run Lifecycle Test</button>
+</div>
+<div id="paymentIntentLifecycleMessage" class="message"></div>
 </section>
 <section id="paymentRoutingPanel" class="panel" hidden>
 <div class="section-heading"><h2>Payment Channel Routing Abstraction</h2><p>Memisahkan channel pembayaran dari provider adapter. QRIS, BANK_TRANSFER, dan VIRTUAL_ACCOUNT diarahkan melalui trusted backend. Fase ini tetap SANDBOX dan live provider OFF.</p></div>
