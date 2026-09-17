@@ -1,5 +1,5 @@
 {
-  "version": "23.1.0",
+  "version": "23.2.0",
   "collections": {
     "admins": {
       "fields": [
@@ -105,7 +105,8 @@
         "target_reference",
         "previous_amount",
         "target_amount",
-        "upgrade_delta"
+        "upgrade_delta",
+        "idempotency_key"
       ]
     },
     "transactions": {
