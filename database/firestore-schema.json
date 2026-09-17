@@ -1,5 +1,5 @@
 {
-  "version": "23.0.0",
+  "version": "23.1.0",
   "collections": {
     "admins": {
       "fields": [
@@ -34,7 +34,12 @@
         "created_at",
         "updated_at",
         "application_id",
-        "environment"
+        "environment",
+        "production",
+        "api_key_fingerprint",
+        "api_key_present",
+        "allowed_channels",
+        "webhook_enabled"
       ]
     },
     "banks": {
