@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.1.0",
+version:"22.2.0",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -83,13 +83,13 @@ async loadHealthChecks(){const list=document.getElementById("healthList");if(!db
 async runFailureTest(){const m=document.getElementById("failureTestMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}const tx=document.getElementById("failureTxId").value.trim(),scenario=document.getElementById("failureScenario").value;if(!tx){m.textContent="Transaction ID wajib diisi.";return}const id=`FT-${Date.now()}`;const data={failure_test_id:id,transaction_id:tx,scenario,result:"PASS_EXPECTED_GUARD",production:false,real_bank_called:false,idempotency_key:`${scenario}:${tx}`,created_by:currentUser.uid,created_at:serverTimestamp()};try{await addDoc(collection(db,"failure_tests"),data);document.getElementById("failureTestForm").reset();m.textContent=`Test ${id}: ${scenario} registrasi berhasil. Live bank tidak dipanggil.`;await this.loadFailureTests()}catch(e){m.textContent="Gagal mencatat failure test: "+e.message}},
 async loadFailureTests(){const list=document.getElementById("failureTestList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"failure_tests"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada failure test.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.failure_test_id||"-")}</h3><div class="meta">TX: ${this.escape(x.transaction_id||"-")} · Key: ${this.escape(x.idempotency_key||"-")}</div></div><span class="status">${this.escape(x.scenario||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Failure test belum dapat dibaca.</div>'}},
 async runSandbox(){const m=document.getElementById("sandboxMessage");if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
-const eventId=document.getElementById("sandboxEventId").value.trim(),userId=document.getElementById("sandboxUserId").value.trim(),amount=Number(document.getElementById("sandboxAmount").value),outcome=document.getElementById("sandboxOutcome").value;
+const eventId=document.getElementById("sandboxEventId").value.trim(),userId=document.getElementById("sandboxUserId").value.trim(),amount=Number(document.getElementById("sandboxAmount").value),outcome=document.getElementById("sandboxOutcome").value,paymentIntentId=(document.getElementById("sandboxPaymentIntentId")?.value||"").trim();
 if(!eventId||!userId||!Number.isSafeInteger(amount)||amount<1){m.textContent="Event, User dan amount valid wajib diisi.";return}
 if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi. Isi API_URL di config/config.js.";return}
 m.textContent="Memproses sandbox melalui trusted backend...";
 try{
   const idToken=await currentUser.getIdToken(true);
-  const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_payment",idToken,eventId,userId,amount,outcome})});
+  const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_payment",idToken,eventId,userId,amount,outcome,paymentIntentId})});
   const result=await response.json();
   if(!result.success)throw new Error(result.error||"Sandbox gagal.");
   document.getElementById("sandboxForm").reset();
