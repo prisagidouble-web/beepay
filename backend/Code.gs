@@ -2,6 +2,7 @@
  * BeePay Backend - Phase 22.4.0
  * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
  * Phase 22.5.0 adds provider adapter boundaries and server-side webhook signature simulation.
+ * Phase 22.6.0 adds provider runtime configuration and credential boundary controls.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -10,7 +11,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.5.0";
+const BEEPAY_VERSION = "22.6.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -71,6 +72,14 @@ function doPost(e) {
     if (body.action === "sandbox_provider_adapter_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxProviderAdapterTest(body);
+      }));
+    }
+    if (body.action === "provider_config_status") {
+      return jsonResponse(processProviderConfigStatus(body));
+    }
+    if (body.action === "sandbox_provider_config_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxProviderConfigTest(body);
       }));
     }
     return jsonResponse({
@@ -549,6 +558,175 @@ function processSandboxIdempotencyTest(body) {
  * Provider-specific rules stay outside the payment core.
  * SANDBOX-PJP is the only enabled adapter in this phase.
  */
+
+/**
+ * Runtime provider configuration boundary.
+ * Provider credentials are intentionally read only from Apps Script
+ * Script Properties. Never return credential values to the browser.
+ *
+ * Supported keys for a future live provider:
+ * - BEEPAY_PROVIDER_NAME
+ * - BEEPAY_PROVIDER_ENVIRONMENT
+ * - BEEPAY_PROVIDER_ENABLED
+ * - BEEPAY_PROVIDER_LIVE
+ * - BEEPAY_PROVIDER_API_BASE_URL
+ * - BEEPAY_PROVIDER_API_KEY
+ * - BEEPAY_PROVIDER_API_SECRET
+ * - BEEPAY_PROVIDER_WEBHOOK_SECRET
+ *
+ * Phase 22.6 remains SANDBOX-only, so live providers are not enabled
+ * even if a property is accidentally present.
+ */
+function getProviderRuntimeConfig_() {
+  const props = PropertiesService.getScriptProperties();
+  const environment = String(props.getProperty("BEEPAY_PROVIDER_ENVIRONMENT") || "SANDBOX").trim().toUpperCase();
+  const provider = String(props.getProperty("BEEPAY_PROVIDER_NAME") || "SANDBOX-PJP").trim().toUpperCase();
+  const enabled = String(props.getProperty("BEEPAY_PROVIDER_ENABLED") || "true").trim().toLowerCase() === "true";
+  const liveRequested = String(props.getProperty("BEEPAY_PROVIDER_LIVE") || "false").trim().toLowerCase() === "true";
+  const apiBaseUrl = String(props.getProperty("BEEPAY_PROVIDER_API_BASE_URL") || "").trim();
+  const apiKeyPresent = !!String(props.getProperty("BEEPAY_PROVIDER_API_KEY") || "").trim();
+  const apiSecretPresent = !!String(props.getProperty("BEEPAY_PROVIDER_API_SECRET") || "").trim();
+  const webhookSecretPresent = !!String(props.getProperty("BEEPAY_PROVIDER_WEBHOOK_SECRET") || "").trim();
+
+  return {
+    provider: provider,
+    environment: environment,
+    enabled: enabled,
+    liveRequested: liveRequested,
+    apiBaseUrlConfigured: !!apiBaseUrl,
+    apiKeyPresent: apiKeyPresent,
+    apiSecretPresent: apiSecretPresent,
+    webhookSecretPresent: webhookSecretPresent,
+    credentialSource: "APPS_SCRIPT_SCRIPT_PROPERTIES"
+  };
+}
+
+function processProviderConfigStatus(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const cfg = getProviderRuntimeConfig_();
+  const adapter = getProviderAdapter(cfg.provider);
+  return {
+    success: true,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    provider: cfg.provider,
+    adapterRegistered: !!adapter,
+    adapterEnvironment: adapter ? adapter.environment : null,
+    adapterEnabled: adapter ? adapter.enabled === true : false,
+    adapterLive: adapter ? adapter.live === true : false,
+    configuredEnvironment: cfg.environment,
+    enabled: cfg.enabled,
+    liveRequested: cfg.liveRequested,
+    apiBaseUrlConfigured: cfg.apiBaseUrlConfigured,
+    apiKeyPresent: cfg.apiKeyPresent,
+    apiSecretPresent: cfg.apiSecretPresent,
+    webhookSecretPresent: cfg.webhookSecretPresent,
+    credentialSource: cfg.credentialSource,
+    credentialsExposed: false,
+    message: "Provider runtime configuration tersedia di trusted backend. Nilai credential tidak pernah dikirim ke browser. Phase 22.6 tetap SANDBOX-only.",
+    timestamp: new Date().toISOString()
+  };
+}
+
+function processSandboxProviderConfigTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const cfg = getProviderRuntimeConfig_();
+  const adapter = getProviderAdapter(cfg.provider);
+  const checks = [];
+  function addCheck(name, pass, detail) {
+    checks.push({name:name, pass:!!pass, detail:String(detail || "")});
+  }
+
+  addCheck("Runtime config read only by trusted backend",
+    cfg.credentialSource === "APPS_SCRIPT_SCRIPT_PROPERTIES",
+    cfg.credentialSource);
+  addCheck("Provider is SANDBOX-PJP",
+    cfg.provider === "SANDBOX-PJP",
+    "provider=" + cfg.provider);
+  addCheck("Configured environment is SANDBOX",
+    cfg.environment === "SANDBOX",
+    "environment=" + cfg.environment);
+  addCheck("Provider enabled",
+    cfg.enabled === true,
+    "enabled=" + cfg.enabled);
+  addCheck("Live mode is not requested",
+    cfg.liveRequested === false,
+    "liveRequested=" + cfg.liveRequested);
+  addCheck("Adapter is registered",
+    !!adapter && adapter.enabled === true,
+    adapter ? "registered=" + adapter.provider : "missing");
+  addCheck("Adapter remains non-live",
+    !!adapter && adapter.live === false,
+    adapter ? "live=" + adapter.live : "missing");
+  addCheck("Adapter environment remains SANDBOX",
+    !!adapter && adapter.environment === "SANDBOX",
+    adapter ? "environment=" + adapter.environment : "missing");
+  addCheck("Credential source is not frontend config",
+    cfg.credentialSource !== "FRONTEND",
+    cfg.credentialSource);
+  addCheck("Credential values are not exposed",
+    true,
+    "only presence flags are returned; secret values are never returned");
+  addCheck("Provider API key is represented only as presence flag",
+    typeof cfg.apiKeyPresent === "boolean",
+    "boolean");
+  addCheck("Provider API secret is represented only as presence flag",
+    typeof cfg.apiSecretPresent === "boolean",
+    "boolean");
+  addCheck("Webhook secret is represented only as presence flag",
+    typeof cfg.webhookSecretPresent === "boolean",
+    "boolean");
+  addCheck("Live bank remains disabled",
+    !!adapter && adapter.live === false && cfg.liveRequested === false,
+    "liveBankCalled=false");
+  addCheck("Runtime provider matches adapter boundary",
+    !!adapter && adapter.provider === cfg.provider,
+    "runtime=" + cfg.provider + ", adapter=" + (adapter ? adapter.provider : "-"));
+  addCheck("Sandbox provider signature algorithm remains SHA-256",
+    !!adapter && adapter.signatureAlgorithm === "SHA-256",
+    adapter ? adapter.signatureAlgorithm : "missing");
+  addCheck("Provider adapter exposes only supported sandbox events",
+    !!adapter && adapter.supportedEvents &&
+      adapter.supportedEvents.PAYMENT_PROCESSING === "PROCESSING" &&
+      adapter.supportedEvents.PAYMENT_SUCCEEDED === "SUCCEEDED" &&
+      adapter.supportedEvents.PAYMENT_FAILED === "FAILED",
+    adapter ? JSON.stringify(adapter.supportedEvents) : "missing");
+
+  const passCount = checks.filter(function(x){return x.pass;}).length;
+  const failCount = checks.length - passCount;
+  return {
+    success: failCount === 0,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    provider: cfg.provider,
+    passCount: passCount,
+    failCount: failCount,
+    checked: checks.length,
+    overall: failCount === 0 ? "PASS" : "FAIL",
+    checks: checks,
+    credentialSource: cfg.credentialSource,
+    credentialsExposed: false,
+    message: failCount === 0
+      ? "Provider Configuration Boundary PASS: runtime provider dan credential boundary berada di trusted backend; credential values tidak dikirim ke browser; live provider tetap OFF."
+      : "Provider Configuration Boundary FAIL: periksa checks.",
+    timestamp: new Date().toISOString()
+  };
+}
+
 function getProviderAdapter(provider) {
   const name = String(provider || "").trim().toUpperCase();
   const adapters = {
