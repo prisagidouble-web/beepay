@@ -4,8 +4,8 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"22.3.0",
-async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
+version:"22.4.0",
+async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
 bindAuth(){
@@ -21,7 +21,7 @@ document.getElementById("logoutButton").hidden=!yes;
 document.getElementById("rolePanel").hidden=!yes;
 document.getElementById("paymentProcessing").hidden=!yes;
 if(document.getElementById("sandboxOrderPanel"))document.getElementById("sandboxOrderPanel").hidden=!yes;
-if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;
+if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;
 if(!yes){document.getElementById("authMessage").textContent="Belum login.";return}
 try{
   const snap=await getDoc(doc(db,"admin_users",u.uid));
@@ -68,7 +68,7 @@ try{
 async logout(){if(auth)await signOut(auth)},
 bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()});document.getElementById("sandboxOrderBtn")?.addEventListener("click",()=>this.createSandboxOrder());document.getElementById("bindingAuditBtn")?.addEventListener("click",()=>this.runBindingAudit());document.getElementById("idempotencyTestBtn")?.addEventListener("click",()=>this.runIdempotencyTest())},
 bindCheckout(){document.getElementById("checkoutForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createCheckout()})},
-bindWebhook(){document.getElementById("webhookForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createWebhookLedger()})},
+bindWebhook(){document.getElementById("webhookForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createWebhookLedger()})},bindWebhookSimulation(){document.getElementById("webhookSimulationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runWebhookSimulation()});document.getElementById("webhookLifecycleTestBtn")?.addEventListener("click",()=>this.runWebhookLifecycleTest())},
 bindVerification(){document.getElementById("verificationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createVerificationRecord()})},
 bindResult(){document.getElementById("resultForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createResultRecord()})},
 bindTicket(){document.getElementById("ticketForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createTicketRecord()})},
@@ -123,6 +123,46 @@ if(!intentId||!ref||!Number.isSafeInteger(amount)||amount<1){m.textContent="Paym
 const id=`VR-${Date.now()}`,data={verification_id:id,payment_intent_id:intentId,provider_reference:ref,observed_amount:amount,result,verified:false,verified_by_backend:false,created_by:currentUser.uid,created_at:serverTimestamp()};
 try{await addDoc(collection(db,"verification_ledger"),data);document.getElementById("verificationForm").reset();m.textContent=`Verification ${id} dicatat sebagai audit/QA. Status pembayaran tidak diubah.`;await this.loadVerifications()}catch(e){m.textContent="Gagal mencatat verification: "+e.message}},
 async loadVerifications(){const list=document.getElementById("verificationList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"verification_ledger"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada verification record.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.verification_id||"-")}</h3><div class="meta">Intent: ${this.escape(x.payment_intent_id||"-")} · Ref: ${this.escape(x.provider_reference||"-")} · ${this.escape(String(x.observed_amount||0))} IDR</div></div><span class="status">${this.escape(x.result||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Verification ledger belum dapat dibaca.</div>'}},
+async runWebhookSimulation(){
+const m=document.getElementById("webhookSimulationMessage");
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+const paymentIntentId=document.getElementById("webhookSimulationIntentId").value.trim();
+const provider=document.getElementById("webhookSimulationProvider").value.trim();
+const providerEventId=document.getElementById("webhookSimulationEventId").value.trim();
+const eventType=document.getElementById("webhookSimulationEventType").value;
+const providerReference=document.getElementById("webhookSimulationReference").value.trim();
+const payloadHash=document.getElementById("webhookSimulationHash").value.trim();
+const amount=Number(document.getElementById("webhookSimulationAmount").value);
+const targetStatus=document.getElementById("webhookSimulationStatus").value;
+const signatureValid=document.getElementById("webhookSimulationSignature").value==="VALID";
+if(!paymentIntentId||!provider||!providerEventId||!providerReference||!payloadHash||!Number.isSafeInteger(amount)||amount<1){m.textContent="Semua field webhook dan amount valid wajib diisi.";return}
+m.textContent="Memproses webhook melalui trusted backend...";
+try{
+const idToken=await currentUser.getIdToken(true);
+const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_webhook",idToken,paymentIntentId,provider,providerEventId,eventType,providerReference,payloadHash,amount,targetStatus,signatureValid})});
+const result=await response.json();
+if(result.rejected){m.textContent=`Webhook REJECTED: ${result.reason}. ${result.message||""}`;return}
+if(!result.success)throw new Error(result.error||"Webhook gagal.");
+m.textContent=`Webhook ${result.targetStatus} ${result.existing?"IDEMPOTENT":"PROCESSED"}. ${result.message||""} Transaction: ${result.transactionId||"-"} · Ticket: ${result.ticketId||"-"}`;
+await this.loadIntents();await this.loadTickets();
+}catch(e){console.error(e);m.textContent="Webhook gagal: "+e.message}
+},
+async runWebhookLifecycleTest(){
+const m=document.getElementById("webhookLifecycleTestMessage");
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+m.textContent="Menjalankan lifecycle webhook test...";
+try{
+const idToken=await currentUser.getIdToken(true);
+const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_webhook_lifecycle_test",idToken})});
+const result=await response.json();
+if(!result.success)throw new Error(result.error||"Lifecycle webhook test gagal.");
+const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}`).join(" · ");
+m.textContent=`Lifecycle Webhook ${result.overall}: PASS ${result.passCount} · FAIL ${result.failCount}. ${result.message} ${detail}`;
+await this.loadIntents();await this.loadTickets();
+}catch(e){console.error(e);m.textContent="Lifecycle webhook test gagal: "+e.message}
+},
 async createWebhookLedger(){const m=document.getElementById("webhookMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}
 const provider=document.getElementById("webhookProvider").value.trim(),eventType=document.getElementById("webhookEventType").value.trim(),reference=document.getElementById("webhookReference").value.trim(),payloadHash=document.getElementById("webhookPayloadHash").value.trim();
 if(!provider||!eventType||!reference||!payloadHash){m.textContent="Semua field webhook wajib diisi.";return}
@@ -205,7 +245,7 @@ try{
   const result=await response.json();
   if(!result.success)throw new Error(result.error||"Gagal membuat Payment Intent.");
   document.getElementById("intentForm").reset();
-  if(document.getElementById("bindingAuditIntentId"))document.getElementById("bindingAuditIntentId").value=result.paymentIntentId||"";
+  if(document.getElementById("bindingAuditIntentId"))document.getElementById("bindingAuditIntentId").value=result.paymentIntentId||"";if(document.getElementById("webhookSimulationIntentId"))document.getElementById("webhookSimulationIntentId").value=result.paymentIntentId||"";if(document.getElementById("webhookSimulationAmount"))document.getElementById("webhookSimulationAmount").value=result.amount||amount;
   m.textContent=`Payment Intent ${result.paymentIntentId} ${result.existing?"sudah ada":"berhasil dibuat"}. Status: ${result.status}. ${result.message||""}`;
   await this.loadIntents();
 }catch(e){console.error(e);m.textContent="Gagal membuat intent: "+e.message}},
