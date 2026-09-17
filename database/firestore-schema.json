@@ -1,5 +1,5 @@
 {
-  "version": "22.4.0",
+  "version": "22.5.0",
   "collections": {
     "admins": {
       "fields": [
@@ -189,7 +189,10 @@
         "provider_event_id",
         "payment_intent_id",
         "target_status",
-        "production"
+        "production",
+        "currency",
+        "signature_algorithm",
+        "adapter"
       ]
     },
     "tickets": {
@@ -357,6 +360,18 @@
         "bank_called",
         "approval",
         "created_by",
+        "created_at"
+      ]
+    },
+    "provider_adapter_audits": {
+      "fields": [
+        "audit_id",
+        "provider",
+        "environment",
+        "signature_algorithm",
+        "result",
+        "checks",
+        "payment_intent_id",
         "created_at"
       ]
     }
@@ -545,5 +560,24 @@
       "security rules reviewed",
       "backup/recovery procedure verified"
     ]
+  },
+  "provider_adapter_lifecycle": [
+    "REGISTERED",
+    "ENABLED",
+    "SIGNATURE_VERIFIED",
+    "EVENT_MAPPED",
+    "REJECTED",
+    "PROCESSED"
+  ],
+  "provider_adapter_rules": {
+    "provider_adapter_required": true,
+    "provider_specific_rules_isolated": true,
+    "live_provider_not_enabled_in_sandbox": true,
+    "signature_verified_server_side": true,
+    "browser_never_receives_provider_secret": true,
+    "event_type_must_map_to_allowed_status": true,
+    "amount_currency_must_match_intent": true,
+    "provider_reference_deduplication_required": true,
+    "duplicate_provider_event_is_idempotent": true
   }
 }
