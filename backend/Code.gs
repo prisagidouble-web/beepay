@@ -19,7 +19,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.2.0";
+const BEEPAY_VERSION = "23.2.1";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -1267,7 +1267,7 @@ function processMerchantRegistryStatus(body){
       production:d.production===true,apiKeyPresent:d.api_key_present===true,
       apiKeyFingerprint:d.api_key_fingerprint?maskFingerprint_(d.api_key_fingerprint):""};
   });
-  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,registryVersion:"23.1.0",
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,registryVersion:BEEPAY_VERSION,
     merchantCount:rows.length,merchants:rows,rawSecretsReturned:false,credentialValuesExposed:false,
     message:"Merchant Registry berada di trusted backend. Firestore hanya menyimpan fingerprint; raw API secret tidak dikembalikan.",
     timestamp:new Date().toISOString()};
@@ -1443,32 +1443,35 @@ function processUniversalPaymentApiTest(body){
   add("Merchant registry fixture exists",!!merchant,merchantId);
   if(!merchant) return {success:false,environment:"SANDBOX",production:false,passCount:1,failCount:1,checked:2,overall:"FAIL",checks:checks,message:"Merchant registry fixture belum tersedia. Jalankan Phase 23.1 Registry & Auth Test terlebih dahulu."};
   var secret=String(PropertiesService.getScriptProperties().getProperty(merchantPropertyKey_(merchantId))||"").trim();
+  var registeredApplicationId=String(merchant.application_id||"").trim();
+  add("Merchant has a bound Application ID",!!registeredApplicationId,registeredApplicationId);
   add("Merchant is ACTIVE",String(merchant.status||"").toUpperCase()==="ACTIVE",String(merchant.status||""));
   add("Merchant environment is SANDBOX",String(merchant.environment||"").toUpperCase()==="SANDBOX",String(merchant.environment||""));
   add("Credential exists only in trusted backend",!!secret,"Script Properties");
   add("Raw credential is not returned",true,"credential omitted from API response");
   add("Allowed QRIS channel exists",(merchant.allowed_channels||["QRIS"]).indexOf("QRIS")>=0,"QRIS");
   var stamp=Date.now(),orderId="ORDER-API-232-"+stamp,now=new Date().toISOString();
+  var testApplicationId=registeredApplicationId||"SANDBOX-APP-231";
   createDocument("orders",orderId,{order_id:str(orderId),user_id:str(authUser.uid),merchant_id:str(merchantId),
-    application_id:str("SANDBOX-API-232"),event_id:str("SANDBOX-API-232"),amount:integer(125000),currency:str("IDR"),
+    application_id:str(testApplicationId),event_id:str("SANDBOX-API-232"),amount:integer(125000),currency:str("IDR"),
     status:str("PENDING_PAYMENT"),payment_method_id:str("SANDBOX"),reference:str("API-ORDER-"+stamp),
     payment_purpose:str("PURCHASE"),created_by:str(authUser.uid),production:boolean(false),source:str("SANDBOX"),
     created_at:timestamp(now),updated_at:timestamp(now)});
-  var request={merchantId:merchantId,applicationId:"SANDBOX-API-232",apiKey:secret,orderId:orderId,amount:125000,
+  var request={merchantId:merchantId,applicationId:testApplicationId,apiKey:secret,orderId:orderId,amount:125000,
     currency:"IDR",channel:"QRIS",paymentPurpose:"PURCHASE",idempotencyKey:"API:"+merchantId+":"+orderId};
   var result=null;
   try{result=processUniversalPaymentApiRequest(request);add("Universal API creates Payment Intent",!!result.paymentIntentId,result.paymentIntentId);}
   catch(e){add("Universal API creates Payment Intent",false,String(e.message||e));}
   if(result){
     add("Payment Intent status is REQUIRES_PAYMENT",result.status==="REQUIRES_PAYMENT",result.status);
-    add("Merchant binding is preserved",result.merchantId===merchantId&&result.applicationId==="SANDBOX-API-232","identity match");
+    add("Merchant/Application binding is preserved",result.merchantId===merchantId&&result.applicationId===testApplicationId,"merchant="+result.merchantId+" application="+result.applicationId);
     add("Amount/currency/channel preserved",result.amount===125000&&result.currency==="IDR"&&result.channel==="QRIS","125000/IDR/QRIS");
     add("Production remains OFF",result.production===false,"production=false");
     add("Live bank remains OFF",result.liveBankCalled===false,"liveBankCalled=false");
     add("Credential values are not exposed",result.credentialValuesExposed===false,"false");
     var second=processUniversalPaymentApiRequest(request);
     add("Same idempotency key is idempotent",second.paymentIntentId===result.paymentIntentId&&second.idempotent===true,"first="+result.paymentIntentId+" second="+second.paymentIntentId);
-    add("Idempotent response remains bound",second.merchantId===merchantId&&second.applicationId==="SANDBOX-API-232","identity match");
+    add("Idempotent response remains bound",second.merchantId===merchantId&&second.applicationId===testApplicationId,"identity match");
     try{processUniversalPaymentApiRequest(Object.assign({},request,{apiKey:"INVALID-API-KEY"}));add("Invalid API key is rejected",false,"unexpectedly accepted");}
     catch(e){add("Invalid API key is rejected",true,String(e.message||e));}
     try{processUniversalPaymentApiRequest(Object.assign({},request,{merchantId:"SANDBOX-MERCHANT-DOES-NOT-EXIST"}));add("Unknown merchant is rejected",false,"unexpectedly accepted");}
