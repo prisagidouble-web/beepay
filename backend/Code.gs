@@ -1,5 +1,5 @@
 /**
- * BeePay Backend - Phase 22.3.0
+ * BeePay Backend - Phase 22.4.0
  * Trusted sandbox payment processor using Google Apps Script + Firestore REST.
  *
  * IMPORTANT:
@@ -9,7 +9,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.3.0";
+const BEEPAY_VERSION = "22.4.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -55,6 +55,16 @@ function doPost(e) {
     if (body.action === "sandbox_idempotency_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxIdempotencyTest(body);
+      }));
+    }
+    if (body.action === "sandbox_webhook") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxWebhook(body);
+      }));
+    }
+    if (body.action === "sandbox_webhook_lifecycle_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxWebhookLifecycleTest(body);
       }));
     }
     return jsonResponse({
@@ -515,6 +525,564 @@ function processSandboxIdempotencyTest(body) {
     message: pass
       ? "Idempotency PASS: dua request dengan key yang sama menghasilkan satu Payment Intent."
       : "Idempotency FAIL: periksa hasil test dan data Payment Intent.",
+    timestamp: new Date().toISOString()
+  };
+}
+
+
+/**
+ * Phase 22.4.0 — trusted SANDBOX webhook processor.
+ *
+ * This simulates a provider callback without accepting any live-bank traffic.
+ * Provider event IDs are idempotent, terminal states are monotonic, and a
+ * successful callback reuses an existing PENDING transaction when present.
+ */
+function processSandboxWebhook(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const paymentIntentId = requiredText(body.paymentIntentId, "Payment Intent ID");
+  const provider = requiredText(body.provider, "Provider");
+  const providerEventId = requiredText(body.providerEventId, "Provider Event ID");
+  const eventType = requiredText(body.eventType, "Event Type").toUpperCase();
+  const providerReference = requiredText(body.providerReference, "Provider Reference");
+  const payloadHash = requiredText(body.payloadHash, "Payload Hash");
+  const amount = Number(body.amount);
+  const targetStatus = requiredText(body.targetStatus, "Target Status").toUpperCase();
+  const signatureValid = body.signatureValid === true;
+
+  if (!/^[A-Za-z0-9._:-]{3,100}$/.test(providerEventId)) {
+    throw new Error("Provider Event ID mengandung karakter yang tidak didukung.");
+  }
+  if (!["PAYMENT_PROCESSING","PAYMENT_SUCCEEDED","PAYMENT_FAILED"].includes(eventType)) {
+    throw new Error("Event Type sandbox tidak valid.");
+  }
+  if (!["PROCESSING","SUCCEEDED","FAILED"].includes(targetStatus)) {
+    throw new Error("Target Status sandbox tidak valid.");
+  }
+  if (!Number.isSafeInteger(amount) || amount < 1) {
+    throw new Error("Amount harus berupa bilangan IDR yang valid.");
+  }
+
+  const intentDoc = getDocument("payment_intents", paymentIntentId);
+  if (!intentDoc || !intentDoc.fields) {
+    throw new Error("Payment Intent tidak ditemukan: " + paymentIntentId);
+  }
+  const intent = decodeFirestoreFields(intentDoc.fields || {});
+  if (intent.production !== false || intent.trusted !== true || intent.created_by_backend !== true) {
+    throw new Error("Payment Intent bukan intent sandbox trusted backend.");
+  }
+  if (Number(intent.amount) !== amount) throw new Error("Nominal webhook tidak sesuai Payment Intent.");
+  if (String(intent.currency || "IDR").toUpperCase() !== "IDR") throw new Error("Currency Payment Intent harus IDR.");
+
+  const expectedEventType = targetStatus === "PROCESSING"
+    ? "PAYMENT_PROCESSING"
+    : targetStatus === "SUCCEEDED"
+      ? "PAYMENT_SUCCEEDED"
+      : "PAYMENT_FAILED";
+  if (eventType !== expectedEventType) {
+    throw new Error("Event Type tidak sesuai dengan Target Status.");
+  }
+
+  const webhookId = "WH-SBX-" + providerEventId;
+  const existingWebhook = getDocument("webhooks", webhookId);
+  if (existingWebhook && existingWebhook.fields) {
+    const existingData = decodeFirestoreFields(existingWebhook.fields || {});
+    return {
+      success: true,
+      existing: true,
+      idempotent: true,
+      environment: "SANDBOX",
+      production: false,
+      webhookId: webhookId,
+      providerEventId: providerEventId,
+      paymentIntentId: paymentIntentId,
+      targetStatus: String(existingData.target_status || targetStatus),
+      processingStatus: String(existingData.status || "PROCESSED"),
+      processingResult: String(existingData.processing_result || "Webhook sudah diproses sebelumnya."),
+      message: "Duplicate webhook diterima secara idempotent. Tidak ada perubahan state tambahan.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  // Invalid signature/authentication is recorded as REJECTED, but it can never
+  // mutate the Payment Intent, Transaction, Payment, Ledger, or Ticket.
+  if (!signatureValid) {
+    createDocument("webhooks", webhookId, {
+      webhook_id: str(webhookId),
+      provider: str(provider),
+      provider_event_id: str(providerEventId),
+      event_type: str(eventType),
+      reference: str(providerReference),
+      payment_intent_id: str(paymentIntentId),
+      payload_hash: str(payloadHash),
+      target_status: str(targetStatus),
+      status: str("REJECTED"),
+      processing_result: str("INVALID_SIGNATURE"),
+      received_at: timestamp(new Date().toISOString()),
+      processed_at: timestamp(new Date().toISOString()),
+      created_by: str(authUser.uid),
+      production: boolean(false)
+    });
+    return {
+      success: false,
+      rejected: true,
+      environment: "SANDBOX",
+      production: false,
+      webhookId: webhookId,
+      providerEventId: providerEventId,
+      paymentIntentId: paymentIntentId,
+      targetStatus: targetStatus,
+      reason: "INVALID_SIGNATURE",
+      message: "Webhook ditolak. Signature sandbox tidak valid dan state pembayaran tidak diubah.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  // A provider reference must not be reused by a different event.
+  const referenceCollision = listDocuments("webhooks", 500).find(function(item) {
+    const d = item.data || {};
+    return String(d.provider || "") === provider &&
+      String(d.reference || "") === providerReference &&
+      String(d.provider_event_id || "") !== providerEventId &&
+      String(d.status || "").toUpperCase() === "PROCESSED";
+  });
+  if (referenceCollision) {
+    createDocument("webhooks", webhookId, {
+      webhook_id: str(webhookId),
+      provider: str(provider),
+      provider_event_id: str(providerEventId),
+      event_type: str(eventType),
+      reference: str(providerReference),
+      payment_intent_id: str(paymentIntentId),
+      payload_hash: str(payloadHash),
+      target_status: str(targetStatus),
+      status: str("REJECTED"),
+      processing_result: str("DUPLICATE_PROVIDER_REFERENCE"),
+      received_at: timestamp(new Date().toISOString()),
+      processed_at: timestamp(new Date().toISOString()),
+      created_by: str(authUser.uid),
+      production: boolean(false)
+    });
+    return {
+      success: false,
+      rejected: true,
+      environment: "SANDBOX",
+      production: false,
+      webhookId: webhookId,
+      providerEventId: providerEventId,
+      paymentIntentId: paymentIntentId,
+      targetStatus: targetStatus,
+      reason: "DUPLICATE_PROVIDER_REFERENCE",
+      message: "Webhook ditolak karena provider reference sudah digunakan oleh event lain.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  const currentStatus = String(intent.status || "").toUpperCase();
+  const terminal = ["SUCCEEDED","FAILED"];
+  if (terminal.includes(currentStatus)) {
+    createDocument("webhooks", webhookId, {
+      webhook_id: str(webhookId),
+      provider: str(provider),
+      provider_event_id: str(providerEventId),
+      event_type: str(eventType),
+      reference: str(providerReference),
+      payment_intent_id: str(paymentIntentId),
+      payload_hash: str(payloadHash),
+      target_status: str(targetStatus),
+      status: str("REJECTED"),
+      processing_result: str("OUT_OF_ORDER_TERMINAL_STATE"),
+      received_at: timestamp(new Date().toISOString()),
+      processed_at: timestamp(new Date().toISOString()),
+      created_by: str(authUser.uid),
+      production: boolean(false)
+    });
+    return {
+      success: false,
+      rejected: true,
+      environment: "SANDBOX",
+      production: false,
+      webhookId: webhookId,
+      providerEventId: providerEventId,
+      paymentIntentId: paymentIntentId,
+      targetStatus: targetStatus,
+      reason: "OUT_OF_ORDER_TERMINAL_STATE",
+      currentStatus: currentStatus,
+      message: "Webhook out-of-order ditolak karena Payment Intent sudah berada pada status terminal.",
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  const now = new Date().toISOString();
+  const transactions = listDocuments("transactions", 500).filter(function(item) {
+    return String(item.data.payment_intent_id || "") === paymentIntentId;
+  });
+  let tx = transactions.find(function(item) {
+    return String(item.data.status || "").toUpperCase() === "PENDING";
+  });
+  let txId = tx ? String(tx.data.transaction_id || tx.id) : "";
+  let paymentId = "";
+  let ticketId = "";
+
+  if (targetStatus === "PROCESSING") {
+    if (!tx) {
+      txId = "SBX-WH-TX-" + Date.now();
+      createDocument("transactions", txId, {
+        transaction_id: str(txId),
+        order_id: str(intent.order_id || ""),
+        payment_intent_id: str(paymentIntentId),
+        event_id: str(intent.event_id || ""),
+        user_id: str(intent.user_id || ""),
+        amount: integer(amount),
+        currency: str("IDR"),
+        status: str("PENDING"),
+        channel: str(intent.channel || "SANDBOX"),
+        provider_reference: str(providerReference),
+        trusted: boolean(true),
+        production: boolean(false),
+        created_at: timestamp(now),
+        updated_at: timestamp(now)
+      });
+    } else {
+      updateDocument("transactions", txId, {
+        provider_reference: str(providerReference),
+        updated_at: timestamp(now)
+      }, ["provider_reference", "updated_at"]);
+    }
+    updateDocument("payment_intents", paymentIntentId, {
+      status: str("PROCESSING"),
+      provider_reference: str(providerReference),
+      updated_at: timestamp(now)
+    }, ["status", "provider_reference", "updated_at"]);
+  } else if (targetStatus === "SUCCEEDED") {
+    if (tx) {
+      txId = String(tx.data.transaction_id || tx.id);
+      updateDocument("transactions", txId, {
+        status: str("PAID"),
+        provider_reference: str(providerReference),
+        paid_at: timestamp(now),
+        updated_at: timestamp(now)
+      }, ["status", "provider_reference", "paid_at", "updated_at"]);
+    } else {
+      txId = "SBX-WH-TX-" + Date.now();
+      createDocument("transactions", txId, {
+        transaction_id: str(txId),
+        order_id: str(intent.order_id || ""),
+        payment_intent_id: str(paymentIntentId),
+        event_id: str(intent.event_id || ""),
+        user_id: str(intent.user_id || ""),
+        amount: integer(amount),
+        currency: str("IDR"),
+        status: str("PAID"),
+        channel: str(intent.channel || "SANDBOX"),
+        provider_reference: str(providerReference),
+        trusted: boolean(true),
+        production: boolean(false),
+        created_at: timestamp(now),
+        updated_at: timestamp(now),
+        paid_at: timestamp(now)
+      });
+    }
+
+    const paidPayments = listDocuments("payments", 500).filter(function(item) {
+      return String(item.data.payment_intent_id || "") === paymentIntentId &&
+        String(item.data.status || "").toUpperCase() === "PAID";
+    });
+    if (paidPayments.length > 0) {
+      paymentId = String(paidPayments[0].data.payment_id || paidPayments[0].id);
+    } else {
+      paymentId = "PAY-SBX-WH-" + Date.now();
+      createDocument("payments", paymentId, {
+        payment_id: str(paymentId),
+        payment_intent_id: str(paymentIntentId),
+        transaction_id: str(txId),
+        provider: str(provider),
+        channel: str(intent.channel || "SANDBOX"),
+        provider_reference: str(providerReference),
+        status: str("PAID"),
+        created_at: timestamp(now),
+        updated_at: timestamp(now),
+        event_id: str(intent.event_id || ""),
+        user_id: str(intent.user_id || ""),
+        amount: integer(amount),
+        currency: str("IDR"),
+        trusted: boolean(true),
+        production: boolean(false),
+        verified_by_backend: boolean(true)
+      });
+    }
+
+    updateDocument("payment_intents", paymentIntentId, {
+      status: str("SUCCEEDED"),
+      provider_reference: str(providerReference),
+      updated_at: timestamp(now)
+    }, ["status", "provider_reference", "updated_at"]);
+
+    const activeTickets = listDocuments("tickets", 500).filter(function(item) {
+      return String(item.data.payment_intent_id || "") === paymentIntentId &&
+        String(item.data.status || "").toUpperCase() === "ACTIVE";
+    });
+    if (activeTickets.length > 0) {
+      ticketId = String(activeTickets[0].data.ticket_id || activeTickets[0].id);
+    } else {
+      ticketId = "TKT-SBX-WH-" + Date.now();
+      createDocument("tickets", ticketId, {
+        ticket_id: str(ticketId),
+        order_id: str(intent.order_id || ""),
+        transaction_id: str(txId),
+        payment_intent_id: str(paymentIntentId),
+        user_id: str(intent.user_id || ""),
+        event_id: str(intent.event_id || ""),
+        status: str("ACTIVE"),
+        active: boolean(true),
+        activated_by_backend: boolean(true),
+        activation_source: str("SANDBOX_WEBHOOK_TRUSTED_BACKEND"),
+        production: boolean(false),
+        created_at: timestamp(now),
+        activated_at: timestamp(now)
+      });
+    }
+  } else if (targetStatus === "FAILED") {
+    if (tx) {
+      txId = String(tx.data.transaction_id || tx.id);
+      updateDocument("transactions", txId, {
+        status: str("FAILED"),
+        provider_reference: str(providerReference),
+        updated_at: timestamp(now)
+      }, ["status", "provider_reference", "updated_at"]);
+    } else {
+      txId = "SBX-WH-TX-" + Date.now();
+      createDocument("transactions", txId, {
+        transaction_id: str(txId),
+        order_id: str(intent.order_id || ""),
+        payment_intent_id: str(paymentIntentId),
+        event_id: str(intent.event_id || ""),
+        user_id: str(intent.user_id || ""),
+        amount: integer(amount),
+        currency: str("IDR"),
+        status: str("FAILED"),
+        channel: str(intent.channel || "SANDBOX"),
+        provider_reference: str(providerReference),
+        trusted: boolean(true),
+        production: boolean(false),
+        created_at: timestamp(now),
+        updated_at: timestamp(now)
+      });
+    }
+    updateDocument("payment_intents", paymentIntentId, {
+      status: str("FAILED"),
+      provider_reference: str(providerReference),
+      updated_at: timestamp(now)
+    }, ["status", "provider_reference", "updated_at"]);
+  }
+
+  createDocument("webhooks", webhookId, {
+    webhook_id: str(webhookId),
+    provider: str(provider),
+    provider_event_id: str(providerEventId),
+    event_type: str(eventType),
+    reference: str(providerReference),
+    payment_intent_id: str(paymentIntentId),
+    payload_hash: str(payloadHash),
+    target_status: str(targetStatus),
+    status: str("PROCESSED"),
+    processing_result: str(targetStatus === "SUCCEEDED" ? "PAYMENT_ACTIVATED" : targetStatus),
+    received_at: timestamp(now),
+    processed_at: timestamp(now),
+    created_by: str(authUser.uid),
+    production: boolean(false)
+  });
+
+  createDocument("audit_logs", "AUD-SBX-WH-" + Date.now(), {
+    audit_id: str("AUD-SBX-WH-" + Date.now()),
+    action: str("SANDBOX_WEBHOOK"),
+    target_id: str(webhookId),
+    severity: str("INFO"),
+    outcome: str(targetStatus),
+    payment_intent_id: str(paymentIntentId),
+    provider_reference: str(providerReference),
+    production: boolean(false),
+    real_bank_called: boolean(false),
+    created_by: str(authUser.uid),
+    created_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    existing: false,
+    idempotent: false,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    webhookId: webhookId,
+    providerEventId: providerEventId,
+    paymentIntentId: paymentIntentId,
+    targetStatus: targetStatus,
+    processingStatus: "PROCESSED",
+    transactionId: txId,
+    paymentId: paymentId || null,
+    ticketId: ticketId || null,
+    message: targetStatus === "SUCCEEDED"
+      ? "Webhook SUCCESS diproses trusted backend. Payment PAID dan ticket ACTIVE."
+      : "Webhook " + targetStatus + " diproses trusted backend.",
+    timestamp: now
+  };
+}
+
+/**
+ * Controlled Phase 22.4 lifecycle test.
+ * Creates a fresh sandbox intent, then verifies:
+ * PROCESSING → duplicate PROCESSING → SUCCEEDED → duplicate SUCCEEDED,
+ * followed by rejected out-of-order FAILED and rejected invalid signature.
+ */
+function processSandboxWebhookLifecycleTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  const stamp = Date.now();
+  const orderId = "ORDER-SBX-WH-" + stamp;
+  const eventId = "EVENT-002";
+  const userId = "TEST-USER-002";
+  const amount = 100000;
+
+  processSandboxCreateOrder({
+    idToken: body.idToken,
+    orderId: orderId,
+    eventId: eventId,
+    userId: userId,
+    amount: amount
+  });
+
+  const intent = processCreatePaymentIntent({
+    idToken: body.idToken,
+    orderId: orderId,
+    eventId: eventId,
+    amount: amount,
+    channel: "QRIS",
+    clientReference: "PHASE-22.4-WEBHOOK",
+    idempotencyKey: "PHASE-22.4-WEBHOOK-" + stamp
+  });
+
+  const intentId = intent.paymentIntentId;
+  const provider = "SANDBOX-PJP";
+  const reference = "SBX-WH-REF-" + stamp;
+  const hash = "sha256-sandbox-" + stamp;
+
+  const checks = [];
+  function addCheck(name, pass, detail) {
+    checks.push({name: name, pass: !!pass, detail: detail || ""});
+  }
+  function callWebhook(eventSuffix, eventType, targetStatus, valid) {
+    return processSandboxWebhook({
+      idToken: body.idToken,
+      paymentIntentId: intentId,
+      provider: provider,
+      providerEventId: "EVT-" + stamp + "-" + eventSuffix,
+      eventType: eventType,
+      providerReference: reference + "-" + eventSuffix,
+      payloadHash: hash + "-" + eventSuffix,
+      amount: amount,
+      targetStatus: targetStatus,
+      signatureValid: valid
+    });
+  }
+
+  const p1 = callWebhook("P", "PAYMENT_PROCESSING", "PROCESSING", true);
+  addCheck("PROCESSING accepted", p1.success && p1.targetStatus === "PROCESSING", p1.message);
+
+  const duplicateP = processSandboxWebhook({
+    idToken: body.idToken,
+    paymentIntentId: intentId,
+    provider: provider,
+    providerEventId: "EVT-" + stamp + "-P",
+    eventType: "PAYMENT_PROCESSING",
+    providerReference: reference + "-P",
+    payloadHash: hash + "-P",
+    amount: amount,
+    targetStatus: "PROCESSING",
+    signatureValid: true
+  });
+  addCheck("Duplicate PROCESSING idempotent", duplicateP.success && duplicateP.idempotent === true, duplicateP.message);
+
+  const s1 = callWebhook("S", "PAYMENT_SUCCEEDED", "SUCCEEDED", true);
+  addCheck("SUCCEEDED accepted", s1.success && s1.targetStatus === "SUCCEEDED" && !!s1.transactionId && !!s1.paymentId && !!s1.ticketId, s1.message);
+
+  const duplicateS = processSandboxWebhook({
+    idToken: body.idToken,
+    paymentIntentId: intentId,
+    provider: provider,
+    providerEventId: "EVT-" + stamp + "-S",
+    eventType: "PAYMENT_SUCCEEDED",
+    providerReference: reference + "-S",
+    payloadHash: hash + "-S",
+    amount: amount,
+    targetStatus: "SUCCEEDED",
+    signatureValid: true
+  });
+  addCheck("Duplicate SUCCEEDED idempotent", duplicateS.success && duplicateS.idempotent === true, duplicateS.message);
+
+  const outOfOrder = callWebhook("F", "PAYMENT_FAILED", "FAILED", true);
+  addCheck("Out-of-order FAILED rejected", outOfOrder.rejected === true && outOfOrder.reason === "OUT_OF_ORDER_TERMINAL_STATE", outOfOrder.message);
+
+  const invalid = processSandboxWebhook({
+    idToken: body.idToken,
+    paymentIntentId: intentId,
+    provider: provider,
+    providerEventId: "EVT-" + stamp + "-INVALID",
+    eventType: "PAYMENT_SUCCEEDED",
+    providerReference: reference + "-INVALID",
+    payloadHash: hash + "-INVALID",
+    amount: amount,
+    targetStatus: "SUCCEEDED",
+    signatureValid: false
+  });
+  addCheck("Invalid webhook rejected", invalid.rejected === true && invalid.reason === "INVALID_SIGNATURE", invalid.message);
+
+  const finalIntentDoc = getDocument("payment_intents", intentId);
+  const finalIntent = finalIntentDoc ? decodeFirestoreFields(finalIntentDoc.fields || {}) : {};
+  const txs = listDocuments("transactions", 500).filter(function(x) {
+    return String(x.data.payment_intent_id || "") === intentId;
+  });
+  const pays = listDocuments("payments", 500).filter(function(x) {
+    return String(x.data.payment_intent_id || "") === intentId;
+  });
+  const tickets = listDocuments("tickets", 500).filter(function(x) {
+    return String(x.data.payment_intent_id || "") === intentId;
+  });
+
+  addCheck("Final intent SUCCEEDED", String(finalIntent.status || "") === "SUCCEEDED", "status=" + String(finalIntent.status || "-"));
+  addCheck("Exactly one PAID transaction", txs.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; }).length === 1, "PAID transactions=" + txs.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; }).length);
+  addCheck("Exactly one PAID payment", pays.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; }).length === 1, "PAID payments=" + pays.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; }).length);
+  addCheck("Exactly one ACTIVE ticket", tickets.filter(function(x){ return String(x.data.status || "").toUpperCase() === "ACTIVE"; }).length === 1, "ACTIVE tickets=" + tickets.filter(function(x){ return String(x.data.status || "").toUpperCase() === "ACTIVE"; }).length);
+
+  const passCount = checks.filter(function(x){ return x.pass; }).length;
+  const failCount = checks.length - passCount;
+  return {
+    success: failCount === 0,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    overall: failCount === 0 ? "PASS" : "FAIL",
+    passCount: passCount,
+    failCount: failCount,
+    checked: checks.length,
+    paymentIntentId: intentId,
+    transactionId: s1.transactionId || null,
+    paymentId: s1.paymentId || null,
+    ticketId: s1.ticketId || null,
+    checks: checks,
+    message: failCount === 0
+      ? "Lifecycle webhook PASS: PROCESSING → SUCCEEDED → PAID → ACTIVE; duplicate dan invalid/out-of-order webhook aman."
+      : "Lifecycle webhook menemukan kegagalan. Periksa checks.",
     timestamp: new Date().toISOString()
   };
 }
