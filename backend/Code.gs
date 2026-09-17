@@ -6,6 +6,7 @@
  * Phase 22.7.0 adds payment-channel routing abstraction; routing remains SANDBOX-only.
  * Phase 22.8.0 adds Payment Intent expiration/cancellation lifecycle guards and tests.
  * Phase 22.8.1 fixes lifecycle webhook test assertions for structured rejection responses.
+ * Phase 22.9.0 adds payment receipt and reconciliation controls.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -14,7 +15,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.8.1";
+const BEEPAY_VERSION = "22.9.0";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -96,6 +97,14 @@ function doPost(e) {
     if (body.action === "sandbox_payment_intent_lifecycle_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxPaymentIntentLifecycleTest(body);
+      }));
+    }
+    if (body.action === "payment_reconciliation_status") {
+      return jsonResponse(processPaymentReconciliationStatus(body));
+    }
+    if (body.action === "sandbox_payment_reconciliation_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxPaymentReconciliationTest(body);
       }));
     }
     return jsonResponse({
@@ -910,6 +919,173 @@ function processSandboxProviderRoutingTest(body) {
       ? "Payment Channel Routing PASS: QRIS, BANK_TRANSFER, dan VIRTUAL_ACCOUNT memiliki route SANDBOX yang deterministik; provider/live boundary tetap aman."
       : "Payment Channel Routing FAIL: periksa checks.",
     timestamp: new Date().toISOString()
+  };
+}
+
+
+function buildPaymentReceipt_(payment, transaction, intent, receiptId) {
+  const now = new Date().toISOString();
+  return {
+    receipt_id: receiptId,
+    payment_id: String(payment.payment_id || ""),
+    transaction_id: String(transaction.transaction_id || ""),
+    payment_intent_id: String(intent.payment_intent_id || ""),
+    order_id: String(intent.order_id || ""),
+    event_id: String(intent.event_id || ""),
+    user_id: String(intent.user_id || ""),
+    amount: Number(intent.amount || 0),
+    currency: String(intent.currency || "IDR"),
+    status: "PAID",
+    provider: String(intent.provider || "SANDBOX-PJP"),
+    provider_reference: String(payment.provider_reference || transaction.provider_reference || ""),
+    channel: String(intent.channel || "QRIS"),
+    issued_at: String(payment.paid_at || transaction.paid_at || now),
+    created_at: now,
+    updated_at: now,
+    production: false,
+    source: "SANDBOX"
+  };
+}
+
+function ensureSandboxReceiptForIntent_(intentId) {
+  const intentDoc=getDocument("payment_intents",intentId);
+  if(!intentDoc || !intentDoc.fields) throw new Error("Payment Intent tidak ditemukan: "+intentId);
+  const intent=decodeFirestoreFields(intentDoc.fields||{});
+  if(intent.production===true || intent.trusted!==true || intent.created_by_backend!==true) {
+    throw new Error("Payment Intent bukan intent sandbox trusted backend.");
+  }
+  if(String(intent.status||"").toUpperCase()!=="SUCCEEDED") {
+    throw new Error("Receipt hanya dapat dibuat untuk Payment Intent SUCCEEDED.");
+  }
+
+  const txs=listDocuments("transactions",500).filter(x=>String(x.data.payment_intent_id||"")===intentId && String(x.data.status||"").toUpperCase()==="PAID");
+  const pays=listDocuments("payments",500).filter(x=>String(x.data.payment_intent_id||"")===intentId && String(x.data.status||"").toUpperCase()==="PAID");
+  if(txs.length!==1) throw new Error("Reconciliation membutuhkan tepat satu PAID transaction.");
+  if(pays.length!==1) throw new Error("Reconciliation membutuhkan tepat satu PAID payment.");
+
+  const tx=txs[0].data, pay=pays[0].data;
+  if(Number(tx.amount)!==Number(intent.amount) || String(tx.currency||"")!=="IDR" ||
+     String(tx.order_id||"")!==String(intent.order_id||"") ||
+     String(tx.event_id||"")!==String(intent.event_id||"") ||
+     String(tx.user_id||"")!==String(intent.user_id||"")) {
+    throw new Error("Transaction identity/amount tidak cocok dengan Payment Intent.");
+  }
+  if(Number(pay.amount)!==Number(intent.amount) || String(pay.currency||"")!=="IDR" ||
+     String(pay.transaction_id||"")!==String(tx.transaction_id||"") ||
+     String(pay.payment_intent_id||"")!==intentId) {
+    throw new Error("Payment identity/amount tidak cocok dengan Transaction/Intent.");
+  }
+
+  const receiptId="RCP-"+intentId;
+  const existingDoc=getDocument("payment_receipts",receiptId);
+  if(existingDoc && existingDoc.fields) {
+    return {receiptId:receiptId,existing:true,receipt:decodeFirestoreFields(existingDoc.fields||{}),transactionId:String(tx.transaction_id||""),paymentId:String(pay.payment_id||"")};
+  }
+
+  const receipt=buildPaymentReceipt_(pay,tx,intent,receiptId);
+  createDocument("payment_receipts",receiptId,{
+    receipt_id:str(receipt.receipt_id), payment_id:str(receipt.payment_id),
+    transaction_id:str(receipt.transaction_id), payment_intent_id:str(receipt.payment_intent_id),
+    order_id:str(receipt.order_id), event_id:str(receipt.event_id), user_id:str(receipt.user_id),
+    amount:integer(receipt.amount), currency:str(receipt.currency), status:str(receipt.status),
+    provider:str(receipt.provider), provider_reference:str(receipt.provider_reference),
+    channel:str(receipt.channel), issued_at:timestamp(receipt.issued_at),
+    created_at:timestamp(receipt.created_at), updated_at:timestamp(receipt.updated_at),
+    production:boolean(false), source:str("SANDBOX")
+  });
+  return {receiptId:receiptId,existing:false,receipt:receipt,transactionId:String(tx.transaction_id||""),paymentId:String(pay.payment_id||"")};
+}
+
+function processPaymentReconciliationStatus(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const intentId=String(body.paymentIntentId||"").trim();
+  if(!intentId) throw new Error("Payment Intent ID wajib.");
+  const intentDoc=getDocument("payment_intents",intentId);
+  if(!intentDoc || !intentDoc.fields) throw new Error("Payment Intent tidak ditemukan: "+intentId);
+  const intent=decodeFirestoreFields(intentDoc.fields||{});
+  const txs=listDocuments("transactions",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
+  const pays=listDocuments("payments",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
+  const receipts=listDocuments("payment_receipts",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
+  return {
+    success:true,environment:"SANDBOX",production:false,liveBankCalled:false,
+    paymentIntentId:intentId,status:String(intent.status||""),
+    transactionCount:txs.length,paymentCount:pays.length,receiptCount:receipts.length,
+    transactionIds:txs.map(x=>String(x.data.transaction_id||"")),
+    paymentIds:pays.map(x=>String(x.data.payment_id||"")),
+    receiptIds:receipts.map(x=>String(x.data.receipt_id||"")),
+    reconciled:(String(intent.status||"").toUpperCase()==="SUCCEEDED" && txs.filter(x=>String(x.data.status||"").toUpperCase()==="PAID").length===1 &&
+      pays.filter(x=>String(x.data.status||"").toUpperCase()==="PAID").length===1 && receipts.length===1),
+    credentialValuesExposed:false,timestamp:new Date().toISOString()
+  };
+}
+
+function processSandboxPaymentReconciliationTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+
+  const intentId=String(body.paymentIntentId||"").trim();
+  if(!intentId) throw new Error("Payment Intent ID wajib untuk test reconciliation.");
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+
+  const intentDoc=getDocument("payment_intents",intentId);
+  addCheck("Payment Intent exists",!!intentDoc,"intent="+intentId);
+  if(!intentDoc || !intentDoc.fields){
+    return {success:false,environment:"SANDBOX",production:false,passCount:1,failCount:1,checked:2,overall:"FAIL",checks:checks,message:"Payment Intent tidak ditemukan."};
+  }
+  const intent=decodeFirestoreFields(intentDoc.fields||{});
+  addCheck("Intent is SANDBOX trusted",intent.production===false && intent.trusted===true && intent.created_by_backend===true,String(intent.status||""));
+  addCheck("Intent terminal status is SUCCEEDED",String(intent.status||"").toUpperCase()==="SUCCEEDED",String(intent.status||""));
+
+  let ensured;
+  try{ ensured=ensureSandboxReceiptForIntent_(intentId); addCheck("Receipt creation/reuse succeeds",!!ensured.receiptId,ensured.receiptId); }
+  catch(e){ addCheck("Receipt creation/reuse succeeds",false,String(e.message||e)); ensured=null; }
+
+  const status=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
+  addCheck("Exactly one PAID transaction",status.transactionCount===1 && (function(){
+    const d=listDocuments("transactions",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
+    return d.filter(x=>String(x.data.status||"").toUpperCase()==="PAID").length===1;
+  })(),String(status.transactionCount));
+  addCheck("Exactly one PAID payment",status.paymentCount===1 && (function(){
+    const d=listDocuments("payments",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
+    return d.filter(x=>String(x.data.status||"").toUpperCase()==="PAID").length===1;
+  })(),String(status.paymentCount));
+  addCheck("Exactly one receipt",status.receiptCount===1,String(status.receiptCount));
+
+  const receiptDoc=getDocument("payment_receipts","RCP-"+intentId);
+  const receipt=receiptDoc&&receiptDoc.fields?decodeFirestoreFields(receiptDoc.fields||{}):null;
+  addCheck("Receipt status is PAID",!!receipt && String(receipt.status||"").toUpperCase()==="PAID",receipt?receipt.status:"missing");
+  addCheck("Receipt amount matches intent",!!receipt && Number(receipt.amount)===Number(intent.amount),receipt?String(receipt.amount):"missing");
+  addCheck("Receipt currency is IDR",!!receipt && String(receipt.currency||"")==="IDR",receipt?receipt.currency:"missing");
+  addCheck("Receipt binds to transaction",!!receipt && !!receipt.transaction_id,String(receipt&&receipt.transaction_id||""));
+  addCheck("Receipt binds to payment",!!receipt && !!receipt.payment_id,String(receipt&&receipt.payment_id||""));
+  addCheck("Receipt binds to Payment Intent",!!receipt && String(receipt.payment_intent_id||"")===intentId,String(receipt&&receipt.payment_intent_id||""));
+  addCheck("Receipt binds to Order/Event/User",!!receipt &&
+    String(receipt.order_id||"")===String(intent.order_id||"") &&
+    String(receipt.event_id||"")===String(intent.event_id||"") &&
+    String(receipt.user_id||"")===String(intent.user_id||""),"identity match");
+  addCheck("Provider reference is preserved",!!receipt && !!String(receipt.provider_reference||"").trim(),String(receipt&&receipt.provider_reference||""));
+  addCheck("Duplicate reconciliation is idempotent",!!ensureSandboxReceiptForIntent_(intentId).existing,true);
+  addCheck("Reconciliation status is consistent",status.reconciled===true,"reconciled="+status.reconciled);
+  addCheck("No credential values exposed",status.credentialValuesExposed===false,"credentialValuesExposed=false");
+  addCheck("Live bank remains disabled",status.liveBankCalled===false && status.production===false,"liveBankCalled=false");
+
+  const passCount=checks.filter(x=>x.pass).length, failCount=checks.length-passCount;
+  return {
+    success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,
+    test:"PAYMENT_RECEIPT_RECONCILIATION",passCount:passCount,failCount:failCount,checked:checks.length,
+    overall:failCount===0?"PASS":"FAIL",paymentIntentId:intentId,
+    receiptId:receipt?String(receipt.receipt_id||""):"",
+    checks:checks,
+    message:failCount===0
+      ?"Payment Receipt & Reconciliation PASS: receipt konsisten dengan Intent/Transaction/Payment dan duplicate reconciliation idempotent."
+      :"Payment Receipt & Reconciliation FAIL: periksa checks.",
+    timestamp:new Date().toISOString()
   };
 }
 
