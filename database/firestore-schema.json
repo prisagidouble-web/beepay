@@ -1,5 +1,5 @@
 {
-  "version": "22.9.0",
+  "version": "23.0.0",
   "collections": {
     "admins": {
       "fields": [
@@ -32,7 +32,9 @@
         "bank_account",
         "created_by",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "application_id",
+        "environment"
       ]
     },
     "banks": {
@@ -91,7 +93,14 @@
         "created_at",
         "updated_at",
         "production",
-        "source"
+        "source",
+        "application_id",
+        "payment_purpose",
+        "source_reference",
+        "target_reference",
+        "previous_amount",
+        "target_amount",
+        "upgrade_delta"
       ]
     },
     "transactions": {
@@ -146,7 +155,14 @@
         "routing_id",
         "expired_at",
         "cancelled_at",
-        "lifecycle_reason"
+        "lifecycle_reason",
+        "application_id",
+        "payment_purpose",
+        "source_reference",
+        "target_reference",
+        "previous_amount",
+        "target_amount",
+        "upgrade_delta"
       ]
     },
     "payments": {
