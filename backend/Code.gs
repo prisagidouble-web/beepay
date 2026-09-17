@@ -19,7 +19,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.2.1";
+const BEEPAY_VERSION = "23.2.2";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -1378,23 +1378,26 @@ function createUniversalPaymentIntent_(order,req,createdBy){
       idempotent:true,credentialValuesExposed:false,message:"Payment Intent sudah ada untuk idempotency key tersebut.",
       timestamp:new Date().toISOString()};
   }
-  var stamp=Date.now(), intentId="PI-"+stamp, now=new Date().toISOString();
-  createDocument("payment_intents",intentId,{
+  var stamp=Date.now(),intentId="PI-"+stamp,now=new Date().toISOString();
+  var fields={
     payment_intent_id:str(intentId),order_id:str(req.orderId),user_id:str(order.user_id||""),
     merchant_id:str(req.merchantId),application_id:str(req.applicationId),event_id:str(order.event_id||""),
     payment_method_id:str(order.payment_method_id||""),amount:integer(req.amount),currency:str("IDR"),
     channel:str(req.channel),provider:str(req.route.provider),provider_adapter:str(req.route.adapter),
     routing_id:str(req.route.routeId),payment_purpose:str(req.paymentPurpose),
     source_reference:str(bodySafeText_(req.sourceReference)),target_reference:str(bodySafeText_(req.targetReference)),
-    previous_amount:req.previousAmount===null?null:integer(req.previousAmount),
-    target_amount:req.targetAmount===null?null:integer(req.targetAmount),
-    upgrade_delta:req.upgradeDelta===null?null:integer(req.upgradeDelta),
     client_reference:str(req.clientReference),idempotency_key:str(req.idempotencyKey),
     status:str("REQUIRES_PAYMENT"),provider_reference:str(""),trusted:boolean(true),production:boolean(false),
     created_by:str(createdBy||"MERCHANT_API"),created_by_backend:boolean(true),
     created_at:timestamp(now),updated_at:timestamp(now),
     expires_at:timestamp(new Date(Date.now()+getPaymentIntentExpirationMinutes_()*60000).toISOString())
-  });
+  };
+  // Firestore REST rejects a raw JS null as an unset Value. Optional upgrade
+  // metadata is therefore written only when it has a concrete value.
+  if(req.previousAmount!==null && req.previousAmount!==undefined) fields.previous_amount=integer(req.previousAmount);
+  if(req.targetAmount!==null && req.targetAmount!==undefined) fields.target_amount=integer(req.targetAmount);
+  if(req.upgradeDelta!==null && req.upgradeDelta!==undefined) fields.upgrade_delta=integer(req.upgradeDelta);
+  createDocument("payment_intents",intentId,fields);
   return {success:true,existing:false,environment:"SANDBOX",production:false,trusted:true,
     paymentIntentId:intentId,orderId:req.orderId,eventId:String(order.event_id||""),
     amount:req.amount,currency:req.currency,channel:req.channel,provider:req.route.provider,
@@ -1404,6 +1407,7 @@ function createUniversalPaymentIntent_(order,req,createdBy){
     message:"Payment Intent berhasil dibuat oleh Universal Merchant Payment API melalui trusted backend.",
     timestamp:now};
 }
+
 function bodySafeText_(v){ return String(v||"").trim(); }
 function processUniversalPaymentApiRequest(body){
   var auth=verifyUniversalMerchantCredential_(body);
