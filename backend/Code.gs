@@ -5,6 +5,7 @@
  * Phase 22.6.0 adds provider runtime configuration and credential boundary controls.
  * Phase 22.7.0 adds payment-channel routing abstraction; routing remains SANDBOX-only.
  * Phase 22.8.0 adds Payment Intent expiration/cancellation lifecycle guards and tests.
+ * Phase 22.8.1 fixes lifecycle webhook test assertions for structured rejection responses.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -13,7 +14,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "22.8.0";
+const BEEPAY_VERSION = "22.8.1";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -1932,12 +1933,14 @@ function processSandboxPaymentIntentLifecycleTest(body) {
 
   let webhookRejected = false, webhookReason = "";
   try {
-    processSandboxWebhook({
+    const webhookResult = processSandboxWebhook({
       idToken: body.idToken, paymentIntentId: exp.intentId, provider: "SANDBOX-PJP",
       providerEventId: "EVT-228-EXP-" + stamp, eventType: "PAYMENT_SUCCEEDED",
       providerReference: "REF-228-EXP-" + stamp, payloadHash: "HASH-228-EXP-" + stamp,
       amount: amount, targetStatus: "SUCCEEDED", signatureValid: true
     });
+    webhookRejected = !!(webhookResult && webhookResult.rejected === true);
+    webhookReason = webhookResult ? String(webhookResult.reason || webhookResult.message || "") : "";
   } catch (e) {
     webhookRejected = true; webhookReason = String(e.message || e);
   }
@@ -1969,12 +1972,14 @@ function processSandboxPaymentIntentLifecycleTest(body) {
 
   let cancelWebhookRejected = false, cancelWebhookReason = "";
   try {
-    processSandboxWebhook({
+    const webhookResult = processSandboxWebhook({
       idToken: body.idToken, paymentIntentId: cancel.intentId, provider: "SANDBOX-PJP",
       providerEventId: "EVT-228-CAN-" + stamp, eventType: "PAYMENT_SUCCEEDED",
       providerReference: "REF-228-CAN-" + stamp, payloadHash: "HASH-228-CAN-" + stamp,
       amount: amount, targetStatus: "SUCCEEDED", signatureValid: true
     });
+    cancelWebhookRejected = !!(webhookResult && webhookResult.rejected === true);
+    cancelWebhookReason = webhookResult ? String(webhookResult.reason || webhookResult.message || "") : "";
   } catch (e) {
     cancelWebhookRejected = true; cancelWebhookReason = String(e.message || e);
   }
