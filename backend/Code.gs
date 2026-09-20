@@ -1375,7 +1375,7 @@ function createUniversalPaymentIntent_(order,req,createdBy){
       provider:String(ed.provider||req.route.provider),providerAdapter:String(ed.provider_adapter||req.route.adapter),
       routingId:String(ed.routing_id||req.route.routeId),merchantId:req.merchantId,applicationId:req.applicationId,
       paymentPurpose:String(ed.payment_purpose||req.paymentPurpose),status:String(ed.status||"REQUIRES_PAYMENT"),
-      idempotent:true,credentialValuesExposed:false,message:"Payment Intent sudah ada untuk idempotency key tersebut.",
+      liveBankCalled:false, idempotent:true,credentialValuesExposed:false,message:"Payment Intent sudah ada untuk idempotency key tersebut.",
       timestamp:new Date().toISOString()};
   }
   var stamp=Date.now(),intentId="PI-"+stamp,now=new Date().toISOString();
@@ -1403,7 +1403,7 @@ function createUniversalPaymentIntent_(order,req,createdBy){
     amount:req.amount,currency:req.currency,channel:req.channel,provider:req.route.provider,
     providerAdapter:req.route.adapter,routingId:req.route.routeId,merchantId:req.merchantId,
     applicationId:req.applicationId,paymentPurpose:req.paymentPurpose,status:"REQUIRES_PAYMENT",
-    idempotent:false,credentialValuesExposed:false,
+    liveBankCalled:false, idempotent:false,credentialValuesExposed:false,
     message:"Payment Intent berhasil dibuat oleh Universal Merchant Payment API melalui trusted backend.",
     timestamp:now};
 }
