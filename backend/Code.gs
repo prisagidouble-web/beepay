@@ -124,6 +124,11 @@ function doPost(e) {
         return processUniversalPaymentApiTest(body);
       }));
     }
+    if (body.action === "create_checkout") {
+      return jsonResponse(withScriptLock(function() {
+        return processCreateCheckout(body);
+      }));
+    }
     if (body.action === "universal_payment_intent") {
       return jsonResponse(withScriptLock(function() {
         return processUniversalPaymentApiRequest(body);
@@ -1359,10 +1364,40 @@ function validateUniversalPaymentRequest_(body){
   return {merchantId:merchantId,applicationId:applicationId,orderId:orderId,amount:amount,currency:currency,
     channel:channel,paymentPurpose:purpose,idempotencyKey:idempotencyKey,route:route};
 }
+function universalIdempotencyDocId_(merchantId, idempotencyKey) {
+  var canonical = String(merchantId||"") + "|" + String(idempotencyKey||"");
+  return "IDX-" + bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256, canonical, Utilities.Charset.UTF_8
+  )).slice(0,40);
+}
+
+function getUniversalIdempotencyIndex_(merchantId, idempotencyKey) {
+  var id = universalIdempotencyDocId_(merchantId, idempotencyKey);
+  var doc = getDocument("payment_intent_idempotency", id);
+  if (!doc || !doc.fields) return null;
+  return decodeFirestoreFields(doc.fields||{});
+}
+
 function createUniversalPaymentIntent_(order,req,createdBy){
-  var existing=listDocuments("payment_intents",200).find(function(item){
-    return String(item.data.idempotency_key||"")===req.idempotencyKey;
-  });
+  var indexed = getUniversalIdempotencyIndex_(req.merchantId, req.idempotencyKey);
+  var existing = null;
+
+  if (indexed && indexed.payment_intent_id) {
+    var indexedIntent = getDocument("payment_intents", String(indexed.payment_intent_id));
+    if (indexedIntent && indexedIntent.fields) {
+      existing = {id:String(indexed.payment_intent_id), data:decodeFirestoreFields(indexedIntent.fields||{})};
+    }
+  }
+
+  // Backward compatibility for older sandbox intents created before the
+  // idempotency index existed. This fallback is bounded and only runs when
+  // the direct index lookup is absent.
+  if (!existing) {
+    existing=listDocuments("payment_intents",200).find(function(item){
+      return String(item.data.idempotency_key||"")===req.idempotencyKey &&
+             String(item.data.merchant_id||"")===req.merchantId;
+    });
+  }
   if(existing){
     var ed=existing.data;
     if(String(ed.order_id||"")!==req.orderId||String(ed.merchant_id||"")!==req.merchantId||
@@ -1398,6 +1433,15 @@ function createUniversalPaymentIntent_(order,req,createdBy){
   if(req.targetAmount!==null && req.targetAmount!==undefined) fields.target_amount=integer(req.targetAmount);
   if(req.upgradeDelta!==null && req.upgradeDelta!==undefined) fields.upgrade_delta=integer(req.upgradeDelta);
   createDocument("payment_intents",intentId,fields);
+  // Direct lookup index prevents a high-traffic request from scanning the
+  // payment_intents collection on every idempotent retry.
+  createDocument("payment_intent_idempotency",universalIdempotencyDocId_(req.merchantId, req.idempotencyKey),{
+    merchant_id:str(req.merchantId),
+    idempotency_key:str(req.idempotencyKey),
+    payment_intent_id:str(intentId),
+    created_at:timestamp(now),
+    production:boolean(false)
+  });
   return {success:true,existing:false,environment:"SANDBOX",production:false,trusted:true,
     paymentIntentId:intentId,orderId:req.orderId,eventId:String(order.event_id||""),
     amount:req.amount,currency:req.currency,channel:req.channel,provider:req.route.provider,
@@ -1406,6 +1450,93 @@ function createUniversalPaymentIntent_(order,req,createdBy){
     liveBankCalled:false,idempotent:false,credentialValuesExposed:false,
     message:"Payment Intent berhasil dibuat oleh Universal Merchant Payment API melalui trusted backend.",
     timestamp:now};
+}
+
+function processCreateCheckout(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  var authUser = verifyFirebaseIdToken(body.idToken);
+  var admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) {
+    throw new Error("Akun tidak memiliki akses admin BeePay.");
+  }
+
+  var intentId = requiredText(body.paymentIntentId, "Payment Intent ID");
+  var paymentMethodId = requiredText(body.paymentMethodId, "Payment Method ID");
+  var eventId = requiredText(body.eventId, "Event ID");
+
+  if (paymentMethodId.length > 120) throw new Error("Payment Method ID terlalu panjang.");
+  if (eventId.length > 120) throw new Error("Event ID terlalu panjang.");
+
+  var intentDoc = getDocument("payment_intents", intentId);
+  if (!intentDoc || !intentDoc.fields) {
+    throw new Error("Payment Intent tidak ditemukan: " + intentId);
+  }
+  var intent = decodeFirestoreFields(intentDoc.fields || {});
+
+  // Checkout is a preparation step only. It can never promote payment state.
+  if (intent.production === true) throw new Error("Checkout sandbox tidak dapat memakai Payment Intent production.");
+  if (intent.trusted !== true || intent.created_by_backend !== true) {
+    throw new Error("Payment Intent tidak berasal dari trusted backend.");
+  }
+  if (String(intent.status || "") !== "REQUIRES_PAYMENT") {
+    throw new Error("Payment Intent tidak berada pada REQUIRES_PAYMENT.");
+  }
+  if (String(intent.event_id || "") !== eventId) {
+    throw new Error("Event ID tidak cocok dengan Payment Intent.");
+  }
+
+  // Deterministic checkout ID gives retries the same session instead of
+  // creating duplicate checkout documents during traffic spikes.
+  var canonical = [intentId, paymentMethodId, eventId].join("|");
+  var checkoutId = "CHK-" + bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256, canonical, Utilities.Charset.UTF_8
+  )).slice(0,40);
+
+  var existing = getDocument("checkout_sessions", checkoutId);
+  if (existing && existing.fields) {
+    var ed = decodeFirestoreFields(existing.fields || {});
+    return {
+      success:true, existing:true, environment:"SANDBOX", production:false,
+      liveBankCalled:false, checkoutSessionId:checkoutId,
+      paymentIntentId:intentId, paymentMethodId:paymentMethodId, eventId:eventId,
+      status:String(ed.status || "READY_FOR_PAYMENT"),
+      providerSessionReference:String(ed.provider_session_reference || ""),
+      message:"Checkout Session sudah ada. Tidak membuat duplicate.",
+      timestamp:new Date().toISOString()
+    };
+  }
+
+  var now = new Date().toISOString();
+  createDocument("checkout_sessions", checkoutId, {
+    checkout_session_id:str(checkoutId),
+    payment_intent_id:str(intentId),
+    payment_method_id:str(paymentMethodId),
+    event_id:str(eventId),
+    merchant_id:str(intent.merchant_id || ""),
+    application_id:str(intent.application_id || ""),
+    amount:integer(Number(intent.amount || 0)),
+    currency:str(String(intent.currency || "IDR")),
+    channel:str(String(intent.channel || "")),
+    status:str("READY_FOR_PAYMENT"),
+    provider_session_reference:str(""),
+    production:boolean(false),
+    trusted:boolean(true),
+    created_by:str(authUser.uid),
+    created_by_backend:boolean(true),
+    created_at:timestamp(now),
+    updated_at:timestamp(now)
+  });
+
+  return {
+    success:true, existing:false, environment:"SANDBOX", production:false,
+    liveBankCalled:false, trusted:true, checkoutSessionId:checkoutId,
+    paymentIntentId:intentId, paymentMethodId:paymentMethodId, eventId:eventId,
+    amount:Number(intent.amount || 0), currency:String(intent.currency || "IDR"),
+    channel:String(intent.channel || ""), status:"READY_FOR_PAYMENT",
+    providerSessionReference:"",
+    message:"Checkout Session berhasil dibuat oleh trusted backend. Belum memanggil bank/PJP.",
+    timestamp:now
+  };
 }
 
 function bodySafeText_(v){ return String(v||"").trim(); }
