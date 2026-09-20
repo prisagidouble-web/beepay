@@ -90,6 +90,14 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Checkout sessions are created by the trusted Apps Script backend.
+    // Admin console may read them for operational visibility, but clients
+    // cannot create, update, or delete checkout state directly.
+    match /checkout_sessions/{checkoutId} {
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']);
+      allow write: if false;
+    }
+
     // Provider/webhook events: never client-writable.
     match /webhook_events/{webhookId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'AUDITOR']);
