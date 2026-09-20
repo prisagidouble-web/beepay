@@ -309,11 +309,20 @@ if(!provider||!eventType||!reference||!payloadHash){m.textContent="Semua field w
 const id=`WH-${Date.now()}`,data={webhook_id:id,provider,event_type:eventType,reference,payload_hash:payloadHash,status:document.getElementById("webhookStatus").value,received_at:serverTimestamp(),created_by:currentUser.uid};
 try{await addDoc(collection(db,"webhooks"),data);document.getElementById("webhookForm").reset();m.textContent=`Webhook ${id} dicatat. Ini belum memvalidasi pembayaran.`;await this.loadWebhooks()}catch(e){m.textContent="Gagal mencatat webhook: "+e.message}},
 async loadWebhooks(){const list=document.getElementById("webhookList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"webhooks"),orderBy("received_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada webhook event.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.webhook_id||"-")}</h3><div class="meta">${this.escape(x.provider||"-")} · ${this.escape(x.event_type||"-")} · Ref: ${this.escape(x.reference||"-")}</div></div><span class="status">${this.escape(x.status||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Webhook ledger belum dapat dibaca.</div>'}},
-async createCheckout(){const m=document.getElementById("checkoutMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}
+async createCheckout(){const m=document.getElementById("checkoutMessage");if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
 const intentId=document.getElementById("checkoutIntentId").value.trim(),pmId=document.getElementById("checkoutPaymentMethodId").value.trim(),eventId=document.getElementById("checkoutEventId").value.trim();
 if(!intentId||!pmId||!eventId){m.textContent="Payment Intent ID, Payment Method ID dan Event ID wajib diisi.";return}
-const id=`CHK-${Date.now()}`,data={checkout_session_id:id,payment_intent_id:intentId,payment_method_id:pmId,event_id:eventId,status:"READY_FOR_PAYMENT",provider_session_reference:null,created_by:currentUser.uid,created_at:serverTimestamp(),updated_at:serverTimestamp()};
-try{await addDoc(collection(db,"checkout_sessions"),data);document.getElementById("checkoutForm").reset();m.textContent=`Checkout ${id} siap. Belum ada konfirmasi pembayaran.`;await this.loadCheckouts()}catch(e){m.textContent="Gagal membuat checkout: "+e.message}},
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){m.textContent="API Apps Script belum dikonfigurasi.";return}
+try{
+  m.textContent="Membuat Checkout Session melalui trusted backend...";
+  const idToken=await currentUser.getIdToken(true);
+  const response=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"create_checkout",idToken,paymentIntentId:intentId,paymentMethodId:pmId,eventId})});
+  const result=await response.json();
+  if(!response.ok||!result.success)throw new Error(result.error||"Checkout gagal dibuat.");
+  document.getElementById("checkoutForm").reset();
+  m.textContent=`Checkout ${result.checkoutSessionId} ${result.existing?"sudah ada":"siap"}. Status: ${result.status}. ${result.message||""}`;
+  await this.loadCheckouts();
+}catch(e){console.error(e);m.textContent="Gagal membuat checkout: "+e.message}},
 async loadCheckouts(){const list=document.getElementById("checkoutList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"checkout_sessions"),orderBy("created_at","desc"),limit(50)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada checkout session.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.checkout_session_id||"-")}</h3><div class="meta">Intent: ${this.escape(x.payment_intent_id||"-")} · Event: ${this.escape(x.event_id||"-")}</div></div><span class="status">${this.escape(x.status||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Checkout belum dapat dibaca.</div>'}},
 async runBindingAudit(){
 const m=document.getElementById("bindingAuditMessage");
