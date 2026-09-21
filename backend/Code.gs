@@ -514,15 +514,12 @@ function processSandboxBindingAudit(body) {
   }
   const intent = decodeFirestoreFields(intentDoc.fields || {});
 
-  const transactions = listDocuments("transactions", 500).filter(function(item) {
-    return String(item.data.payment_intent_id || "") === intentId;
-  });
-  const payments = listDocuments("payments", 500).filter(function(item) {
-    return String(item.data.payment_intent_id || "") === intentId;
-  });
-  const tickets = listDocuments("tickets", 500).filter(function(item) {
-    return String(item.data.payment_intent_id || "") === intentId;
-  });
+  // High-traffic hardening: query by the indexed identity key instead of
+  // downloading up to 500 documents from each ledger and filtering in GAS.
+  // This keeps reconciliation reads bounded to the Payment Intent being audited.
+  const transactions = queryCollectionByField_("transactions", "payment_intent_id", intentId, 10);
+  const payments = queryCollectionByField_("payments", "payment_intent_id", intentId, 10);
+  const tickets = queryCollectionByField_("tickets", "payment_intent_id", intentId, 10);
 
   const checks = [];
   function check(name, pass, detail) {
@@ -2662,14 +2659,15 @@ function processSandboxProviderAdapterTest(body) {
 
   const finalIntentDoc = getDocument("payment_intents", intentId);
   const finalIntent = finalIntentDoc ? decodeFirestoreFields(finalIntentDoc.fields || {}) : {};
-  const txs = listDocuments("transactions", 500).filter(function(x) {
-    return String(x.data.payment_intent_id || "") === intentId && String(x.data.status || "").toUpperCase() === "PAID";
+  // High-traffic hardening: identity-scoped reads only.
+  const txs = queryCollectionByField_("transactions", "payment_intent_id", intentId, 10).filter(function(x) {
+    return String(x.data.status || "").toUpperCase() === "PAID";
   });
-  const pays = listDocuments("payments", 500).filter(function(x) {
-    return String(x.data.payment_intent_id || "") === intentId && String(x.data.status || "").toUpperCase() === "PAID";
+  const pays = queryCollectionByField_("payments", "payment_intent_id", intentId, 10).filter(function(x) {
+    return String(x.data.status || "").toUpperCase() === "PAID";
   });
-  const tickets = listDocuments("tickets", 500).filter(function(x) {
-    return String(x.data.payment_intent_id || "") === intentId && String(x.data.status || "").toUpperCase() === "ACTIVE";
+  const tickets = queryCollectionByField_("tickets", "payment_intent_id", intentId, 10).filter(function(x) {
+    return String(x.data.status || "").toUpperCase() === "ACTIVE";
   });
   addCheck("Final intent SUCCEEDED", String(finalIntent.status || "") === "SUCCEEDED", "status=" + String(finalIntent.status || "-"));
   addCheck("Exactly one PAID transaction", txs.length === 1, "PAID transactions=" + txs.length);
@@ -3475,9 +3473,9 @@ function processSandboxPaymentIntentLifecycleTest(body) {
 
   const expFinalDoc = getDocument("payment_intents", exp.intentId);
   const expFinal = decodeFirestoreFields(expFinalDoc.fields || {});
-  const expTxs = listDocuments("transactions", 500).filter(function(x){return String(x.data.payment_intent_id||"")===exp.intentId;});
-  const expPays = listDocuments("payments", 500).filter(function(x){return String(x.data.payment_intent_id||"")===exp.intentId;});
-  const expTickets = listDocuments("tickets", 500).filter(function(x){return String(x.data.payment_intent_id||"")===exp.intentId;});
+  const expTxs = queryCollectionByField_("transactions", "payment_intent_id", exp.intentId, 10);
+  const expPays = queryCollectionByField_("payments", "payment_intent_id", exp.intentId, 10);
+  const expTickets = queryCollectionByField_("tickets", "payment_intent_id", exp.intentId, 10);
   addCheck("Expired intent remains EXPIRED", String(expFinal.status||"") === "EXPIRED", expFinal.status);
   addCheck("Expired intent has no PAID transaction", expTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+expTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
   addCheck("Expired intent has no PAID payment", expPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+expPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
@@ -3514,9 +3512,9 @@ function processSandboxPaymentIntentLifecycleTest(body) {
 
   const canFinalDoc = getDocument("payment_intents", cancel.intentId);
   const canFinal = decodeFirestoreFields(canFinalDoc.fields || {});
-  const canTxs = listDocuments("transactions", 500).filter(function(x){return String(x.data.payment_intent_id||"")===cancel.intentId;});
-  const canPays = listDocuments("payments", 500).filter(function(x){return String(x.data.payment_intent_id||"")===cancel.intentId;});
-  const canTickets = listDocuments("tickets", 500).filter(function(x){return String(x.data.payment_intent_id||"")===cancel.intentId;});
+  const canTxs = queryCollectionByField_("transactions", "payment_intent_id", cancel.intentId, 10);
+  const canPays = queryCollectionByField_("payments", "payment_intent_id", cancel.intentId, 10);
+  const canTickets = queryCollectionByField_("tickets", "payment_intent_id", cancel.intentId, 10);
   addCheck("Cancelled intent remains CANCELLED", String(canFinal.status||"") === "CANCELLED", canFinal.status);
   addCheck("Cancelled intent has no PAID transaction", canTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+canTxs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
   addCheck("Cancelled intent has no PAID payment", canPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0, "PAID="+canPays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
@@ -3723,15 +3721,14 @@ function processSandboxPayment(body) {
   // SUCCESS transaction. Repeated SUCCESS calls return the existing result
   // instead of creating another transaction/payment/ticket.
   if (suppliedIntentId && outcome === "SUCCESS") {
-    const existingTx = listDocuments("transactions", 500).find(function(item) {
-      return String(item.data.payment_intent_id || "") === suppliedIntentId &&
-             String(item.data.status || "").toUpperCase() === "PAID";
+    // High-traffic hardening: scope the idempotency lookup to this intent.
+    const existingTx = queryCollectionByField_("transactions", "payment_intent_id", suppliedIntentId, 10).find(function(item) {
+      return String(item.data.status || "").toUpperCase() === "PAID";
     });
     if (existingTx) {
       const txData = existingTx.data || {};
-      const existingTicket = listDocuments("tickets", 500).find(function(item) {
-        return String(item.data.payment_intent_id || "") === suppliedIntentId &&
-               String(item.data.transaction_id || "") === String(txData.transaction_id || existingTx.id) &&
+      const existingTicket = queryCollectionByField_("tickets", "payment_intent_id", suppliedIntentId, 10).find(function(item) {
+        return String(item.data.transaction_id || "") === String(txData.transaction_id || existingTx.id) &&
                String(item.data.status || "").toUpperCase() === "ACTIVE";
       });
       return {
@@ -3756,9 +3753,8 @@ function processSandboxPayment(body) {
   // PENDING is also idempotent for the same Payment Intent: once a pending
   // transaction exists, a repeated PENDING call returns that transaction.
   if (suppliedIntentId && outcome === "PENDING") {
-    const existingPending = listDocuments("transactions", 500).find(function(item) {
-      return String(item.data.payment_intent_id || "") === suppliedIntentId &&
-             String(item.data.status || "").toUpperCase() === "PENDING";
+    const existingPending = queryCollectionByField_("transactions", "payment_intent_id", suppliedIntentId, 10).find(function(item) {
+      return String(item.data.status || "").toUpperCase() === "PENDING";
     });
     if (existingPending) {
       return {
