@@ -4,8 +4,8 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"23.4.4",
-async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
+version:"23.5.1",
+async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindReconciliationIntegrity();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
 bindAuth(){
@@ -179,6 +179,7 @@ bindReconciliation(){document.getElementById("reconForm")?.addEventListener("sub
 bindAudit(){document.getElementById("auditForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createAuditEvent()})},
 bindSandbox(){document.getElementById("sandboxForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runSandbox()})},bindSandboxAudit(){document.getElementById("sandboxAuditBtn")?.addEventListener("click",async()=>{await this.runSandboxAudit()})},
 bindFailureTests(){document.getElementById("failureTestForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runFailureTest()})},
+bindReconciliationIntegrity(){document.getElementById("reconIntegrityBtn")?.addEventListener("click",async()=>{await this.runReconciliationIntegrityTest()})},
 bindHealth(){document.getElementById("healthCheckForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.recordHealthCheck()})},
 bindFinalAudit(){document.getElementById("auditChecklistForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.recordFinalAudit()})},
 async recordFinalAudit(){const m=document.getElementById("auditChecklistMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}const item=document.getElementById("auditCheckItem").value,status=document.getElementById("auditCheckStatus").value,note=document.getElementById("auditCheckNote").value.trim(),id=`FA-${Date.now()}`;try{await addDoc(collection(db,"final_audits"),{final_audit_id:id,item,status,note,production:false,bank_called:false,approval:false,created_by:currentUser.uid,created_at:serverTimestamp()});document.getElementById("auditChecklistForm").reset();m.textContent=`Final audit ${id} dicatat: ${status}.`;await this.loadFinalAudits()}catch(e){m.textContent="Gagal mencatat final audit: "+e.message}},
@@ -368,6 +369,21 @@ return;
 }
 m.textContent=`Payment Intent Lifecycle ${result.overall}: PASS ${result.passCount} · FAIL ${result.failCount}. ${result.message} ${detail}`;
 }catch(e){console.error(e);m.textContent="Payment Intent Lifecycle Test gagal: "+e.message}
+},
+
+async runReconciliationIntegrityTest(){
+const m=document.getElementById("reconIntegrityMessage");
+const id=document.getElementById("paymentReconciliationIntentId")?.value.trim() || document.getElementById("reconEventId")?.value.trim();
+if(!auth||!currentUser){m.textContent="Login admin terlebih dahulu.";return}
+if(!id){m.textContent="Masukkan Payment Intent ID pada panel Payment Reconciliation.";return}
+m.textContent="Menjalankan Reconciliation Integrity 23.5.1...";
+try{
+const idToken=await currentUser.getIdToken(true);
+const r=await fetch(config.API_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_reconciliation_integrity_test",idToken,paymentIntentId:id})});
+const x=await r.json();
+const detail=(x.checks||[]).map(c=>`${c.pass?"PASS":"FAIL"}: ${c.name}${c.detail?` (${c.detail})`:""}`).join(" · ");
+m.textContent=`Reconciliation Integrity ${x.overall||"FAIL"}: PASS ${x.passCount||0} · FAIL ${x.failCount||0}. ${x.message||x.error||""} ${detail}`;
+}catch(e){console.error(e);m.textContent="Reconciliation Integrity gagal: "+e.message}
 },
 
 async loadPaymentReconciliationStatus(){

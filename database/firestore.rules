@@ -83,6 +83,14 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // Transactions: trusted-backend written ledger. Authorized operational roles
+    // may read reconciliation data; end users may read only their own transactions.
+    match /transactions/{transactionId} {
+      allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']) ||
+        (signedIn() && resource.data.user_id == request.auth.uid);
+      allow write: if false;
+    }
+
     // Payment ledger: read only for authorized users. No client writes.
     match /payment_ledger/{ledgerId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']) ||

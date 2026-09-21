@@ -19,7 +19,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.4.4";
+const BEEPAY_VERSION = "23.5.1";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -105,6 +105,11 @@ function doPost(e) {
     }
     if (body.action === "payment_reconciliation_status") {
       return jsonResponse(processPaymentReconciliationStatus(body));
+    }
+    if (body.action === "sandbox_reconciliation_integrity_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxReconciliationIntegrityTest(body);
+      }));
     }
     if (body.action === "reconciliation_query") {
       return jsonResponse(processReconciliationQuery(body));
@@ -1154,29 +1159,138 @@ function runFirestoreQuery_(eventFilter,statusFilter,pageSize){
   };
 }
 
+function queryCollectionByField_(collection, fieldPath, value, limit) {
+  const url = DB_ROOT.replace(/\/documents$/, "/documents:runQuery");
+  const structured = {
+    from: [{collectionId: collection}],
+    where: {fieldFilter: {
+      field: {fieldPath: fieldPath},
+      op: "EQUAL",
+      value: {stringValue: String(value)}
+    }},
+    limit: Math.max(1, Math.min(Number(limit) || 10, 50))
+  };
+  const raw = firestoreRequest(url, "post", {structuredQuery: structured});
+  const arr = Array.isArray(raw) ? raw : [];
+  return arr.filter(function(item){ return item && item.document; }).map(function(item){
+    const doc = item.document;
+    return {id: doc.name.split("/").pop(), data: decodeFirestoreFields(doc.fields || {})};
+  });
+}
+
+function buildReconciliationIntegrity_(intent, txs, pays, receipts) {
+  const intentStatus = String(intent.status || "").toUpperCase();
+  const paidTxs = txs.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; });
+  const paidPays = pays.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; });
+  const codes = [];
+  const checks = [];
+
+  function check(code, pass, detail) {
+    checks.push({code: code, pass: !!pass, detail: String(detail || "")});
+    if (!pass) codes.push(code);
+  }
+
+  check("INTENT_SUCCEEDED", intentStatus === "SUCCEEDED", intentStatus || "EMPTY");
+  check("ONE_PAID_TRANSACTION", paidTxs.length === 1, String(paidTxs.length));
+  check("ONE_PAID_PAYMENT", paidPays.length === 1, String(paidPays.length));
+  check("ONE_RECEIPT", receipts.length === 1, String(receipts.length));
+
+  const amount = Number(intent.amount || 0);
+  const currency = String(intent.currency || "IDR");
+  if (paidTxs.length === 1) {
+    check("TX_AMOUNT_MATCH", Number(paidTxs[0].data.amount || 0) === amount, String(paidTxs[0].data.amount || 0));
+    check("TX_CURRENCY_MATCH", String(paidTxs[0].data.currency || "") === currency, String(paidTxs[0].data.currency || ""));
+    check("TX_INTENT_BINDING", String(paidTxs[0].data.payment_intent_id || "") === String(intent.payment_intent_id || ""), String(paidTxs[0].data.payment_intent_id || ""));
+  }
+  if (paidPays.length === 1) {
+    check("PAYMENT_AMOUNT_MATCH", Number(paidPays[0].data.amount || 0) === amount, String(paidPays[0].data.amount || 0));
+    check("PAYMENT_CURRENCY_MATCH", String(paidPays[0].data.currency || "") === currency, String(paidPays[0].data.currency || ""));
+    check("PAYMENT_INTENT_BINDING", String(paidPays[0].data.payment_intent_id || "") === String(intent.payment_intent_id || ""), String(paidPays[0].data.payment_intent_id || ""));
+  }
+  if (receipts.length === 1) {
+    const r = receipts[0].data;
+    check("RECEIPT_STATUS_PAID", String(r.status || "").toUpperCase() === "PAID", String(r.status || ""));
+    check("RECEIPT_AMOUNT_MATCH", Number(r.amount || 0) === amount, String(r.amount || 0));
+    check("RECEIPT_CURRENCY_MATCH", String(r.currency || "") === currency, String(r.currency || ""));
+    check("RECEIPT_INTENT_BINDING", String(r.payment_intent_id || "") === String(intent.payment_intent_id || ""), String(r.payment_intent_id || ""));
+    if (paidTxs.length === 1) check("RECEIPT_TRANSACTION_BINDING", String(r.transaction_id || "") === String(paidTxs[0].data.transaction_id || ""), String(r.transaction_id || ""));
+    if (paidPays.length === 1) check("RECEIPT_PAYMENT_BINDING", String(r.payment_id || "") === String(paidPays[0].data.payment_id || ""), String(r.payment_id || ""));
+  }
+
+  return {
+    reconciled: codes.length === 0,
+    integrity: codes.length === 0 ? "CONSISTENT" : "INCONSISTENT",
+    integrityCodes: codes,
+    checks: checks
+  };
+}
+
 function processPaymentReconciliationStatus(body){
   if(!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser=verifyFirebaseIdToken(body.idToken);
   const admin=getAdminProfile(authUser.uid);
   if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Reconciliation.");
   const intentId=String(body.paymentIntentId||"").trim();
   if(!intentId) throw new Error("Payment Intent ID wajib.");
   const intentDoc=getDocument("payment_intents",intentId);
   if(!intentDoc || !intentDoc.fields) throw new Error("Payment Intent tidak ditemukan: "+intentId);
   const intent=decodeFirestoreFields(intentDoc.fields||{});
-  const txs=listDocuments("transactions",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
-  const pays=listDocuments("payments",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
-  const receipts=listDocuments("payment_receipts",500).filter(x=>String(x.data.payment_intent_id||"")===intentId);
+
+  // Phase 23.5.1: targeted backend queries replace broad listDocuments(500).
+  // This keeps reconciliation reads bounded to the selected Payment Intent.
+  const txs=queryCollectionByField_("transactions","payment_intent_id",intentId,10);
+  const pays=queryCollectionByField_("payments","payment_intent_id",intentId,10);
+  const receipts=queryCollectionByField_("payment_receipts","payment_intent_id",intentId,10);
+  const integrity=buildReconciliationIntegrity_(intent,txs,pays,receipts);
+
   return {
     success:true,environment:"SANDBOX",production:false,liveBankCalled:false,
-    paymentIntentId:intentId,status:String(intent.status||""),
+    source:"TRUSTED_BACKEND_TARGETED_QUERY",role:role,paymentIntentId:intentId,
+    status:String(intent.status||""),amount:Number(intent.amount||0),currency:String(intent.currency||"IDR"),
     transactionCount:txs.length,paymentCount:pays.length,receiptCount:receipts.length,
-    transactionIds:txs.map(x=>String(x.data.transaction_id||"")),
-    paymentIds:pays.map(x=>String(x.data.payment_id||"")),
-    receiptIds:receipts.map(x=>String(x.data.receipt_id||"")),
-    reconciled:(String(intent.status||"").toUpperCase()==="SUCCEEDED" && txs.filter(x=>String(x.data.status||"").toUpperCase()==="PAID").length===1 &&
-      pays.filter(x=>String(x.data.status||"").toUpperCase()==="PAID").length===1 && receipts.length===1),
-    credentialValuesExposed:false,timestamp:new Date().toISOString()
+    transactionIds:txs.map(function(x){return String(x.data.transaction_id||x.id||"");}),
+    paymentIds:pays.map(function(x){return String(x.data.payment_id||x.id||"");}),
+    receiptIds:receipts.map(function(x){return String(x.data.receipt_id||x.id||"");}),
+    reconciled:integrity.reconciled,integrity:integrity.integrity,integrityCodes:integrity.integrityCodes,
+    checks:integrity.checks,credentialValuesExposed:false,timestamp:new Date().toISOString()
+  };
+}
+
+function processSandboxReconciliationIntegrityTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Reconciliation.");
+  const intentId=String(body.paymentIntentId||"").trim();
+  if(!intentId) throw new Error("Payment Intent ID wajib untuk integrity test.");
+
+  const status=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  addCheck("Backend response is SANDBOX",status.environment==="SANDBOX",status.environment);
+  addCheck("Live bank remains disabled",status.liveBankCalled===false,"liveBankCalled=false");
+  addCheck("Credential values are not exposed",status.credentialValuesExposed===false,"credentialValuesExposed=false");
+  addCheck("Reconciliation integrity is consistent",status.reconciled===true,status.integrity);
+  addCheck("Integrity code list is empty when reconciled",status.reconciled===true && status.integrityCodes.length===0,JSON.stringify(status.integrityCodes));
+  addCheck("Targeted transaction query is bounded",status.transactionCount<=10,String(status.transactionCount));
+  addCheck("Targeted payment query is bounded",status.paymentCount<=10,String(status.paymentCount));
+  addCheck("Targeted receipt query is bounded",status.receiptCount<=10,String(status.receiptCount));
+
+  const passCount=checks.filter(function(x){return x.pass;}).length;
+  const failCount=checks.length-passCount;
+  return {
+    success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,
+    test:"RECONCILIATION_INTEGRITY_23_5_1",paymentIntentId:intentId,
+    overall:failCount===0?"PASS":"FAIL",passCount:passCount,failCount:failCount,checked:checks.length,
+    reconciliation:status,checks:checks,
+    message:failCount===0
+      ?"Reconciliation Integrity 23.5.1 PASS: query dibatasi ke Payment Intent, binding konsisten, dan live bank tetap OFF."
+      :"Reconciliation Integrity 23.5.1 FAIL: periksa integrityCodes dan checks.",
+    timestamp:new Date().toISOString()
   };
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "23.2.2",
+  "version": "23.4.2",
   "collections": {
     "admins": {
       "fields": [
@@ -256,7 +256,13 @@
         "provider_session_reference",
         "created_by",
         "created_at",
-        "updated_at"
+        "updated_at",
+        "application_id",
+        "amount",
+        "currency",
+        "created_by_backend",
+        "trusted",
+        "production"
       ]
     },
     "verification_ledger": {
