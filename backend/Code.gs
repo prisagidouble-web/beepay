@@ -2690,10 +2690,10 @@ function processSandboxProviderAdapterTest(body) {
   };
 }
 
-function processSandboxWebhook(body) {
-  if (!body.idToken) throw new Error("Firebase ID token wajib.");
-  const authUser = verifyFirebaseIdToken(body.idToken);
-  const admin = getAdminProfile(authUser.uid);
+function processSandboxWebhook(body, trustedAuthUser) {
+  if (!body.idToken && !trustedAuthUser) throw new Error("Firebase ID token wajib.");
+  const authUser = trustedAuthUser || verifyFirebaseIdToken(body.idToken);
+  const admin = trustedAuthUser ? {active:true} : getAdminProfile(authUser.uid);
   if (!admin || admin.active !== true) {
     throw new Error("Akun tidak memiliki akses admin BeePay.");
   }
@@ -2801,10 +2801,10 @@ function processSandboxWebhook(body) {
   }
 
   // A provider reference must not be reused by a different event.
-  const referenceCollision = listDocuments("webhooks", 500).find(function(item) {
+  const referenceCandidates = queryCollectionByField_("webhooks", "reference", providerReference, 20);
+  const referenceCollision = referenceCandidates.find(function(item) {
     const d = item.data || {};
     return String(d.provider || "") === provider &&
-      String(d.reference || "") === providerReference &&
       String(d.provider_event_id || "") !== providerEventId &&
       String(d.status || "").toUpperCase() === "PROCESSED";
   });
@@ -2876,9 +2876,7 @@ function processSandboxWebhook(body) {
   }
 
   const now = new Date().toISOString();
-  const transactions = listDocuments("transactions", 500).filter(function(item) {
-    return String(item.data.payment_intent_id || "") === paymentIntentId;
-  });
+  const transactions = queryCollectionByField_("transactions", "payment_intent_id", paymentIntentId, 10);
   let tx = transactions.find(function(item) {
     return String(item.data.status || "").toUpperCase() === "PENDING";
   });
@@ -2946,9 +2944,8 @@ function processSandboxWebhook(body) {
       });
     }
 
-    const paidPayments = listDocuments("payments", 500).filter(function(item) {
-      return String(item.data.payment_intent_id || "") === paymentIntentId &&
-        String(item.data.status || "").toUpperCase() === "PAID";
+    const paidPayments = queryCollectionByField_("payments", "payment_intent_id", paymentIntentId, 10).filter(function(item) {
+      return String(item.data.status || "").toUpperCase() === "PAID";
     });
     if (paidPayments.length > 0) {
       paymentId = String(paidPayments[0].data.payment_id || paidPayments[0].id);
@@ -2980,9 +2977,8 @@ function processSandboxWebhook(body) {
       updated_at: timestamp(now)
     }, ["status", "provider_reference", "updated_at"]);
 
-    const activeTickets = listDocuments("tickets", 500).filter(function(item) {
-      return String(item.data.payment_intent_id || "") === paymentIntentId &&
-        String(item.data.status || "").toUpperCase() === "ACTIVE";
+    const activeTickets = queryCollectionByField_("tickets", "payment_intent_id", paymentIntentId, 10).filter(function(item) {
+      return String(item.data.status || "").toUpperCase() === "ACTIVE";
     });
     if (activeTickets.length > 0) {
       ticketId = String(activeTickets[0].data.ticket_id || activeTickets[0].id);
@@ -3117,7 +3113,7 @@ function processSandboxWebhookLifecycleTest(body) {
     eventId: eventId,
     userId: userId,
     amount: amount
-  });
+  }, authUser);
 
   const intent = processCreatePaymentIntent({
     idToken: body.idToken,
@@ -3127,7 +3123,7 @@ function processSandboxWebhookLifecycleTest(body) {
     channel: "QRIS",
     clientReference: "PHASE-22.4-WEBHOOK",
     idempotencyKey: "PHASE-22.4-WEBHOOK-" + stamp
-  });
+  }, authUser);
 
   const intentId = intent.paymentIntentId;
   const provider = "SANDBOX-PJP";
@@ -3150,7 +3146,7 @@ function processSandboxWebhookLifecycleTest(body) {
       amount: amount,
       targetStatus: targetStatus,
       signatureValid: valid
-    });
+    }, authUser);
   }
 
   const p1 = callWebhook("P", "PAYMENT_PROCESSING", "PROCESSING", true);
@@ -3167,7 +3163,7 @@ function processSandboxWebhookLifecycleTest(body) {
     amount: amount,
     targetStatus: "PROCESSING",
     signatureValid: true
-  });
+  }, authUser);
   addCheck("Duplicate PROCESSING idempotent", duplicateP.success && duplicateP.idempotent === true, duplicateP.message);
 
   const s1 = callWebhook("S", "PAYMENT_SUCCEEDED", "SUCCEEDED", true);
@@ -3184,7 +3180,7 @@ function processSandboxWebhookLifecycleTest(body) {
     amount: amount,
     targetStatus: "SUCCEEDED",
     signatureValid: true
-  });
+  }, authUser);
   addCheck("Duplicate SUCCEEDED idempotent", duplicateS.success && duplicateS.idempotent === true, duplicateS.message);
 
   const outOfOrder = callWebhook("F", "PAYMENT_FAILED", "FAILED", true);
@@ -3201,20 +3197,14 @@ function processSandboxWebhookLifecycleTest(body) {
     amount: amount,
     targetStatus: "SUCCEEDED",
     signatureValid: false
-  });
+  }, authUser);
   addCheck("Invalid webhook rejected", invalid.rejected === true && invalid.reason === "INVALID_SIGNATURE", invalid.message);
 
   const finalIntentDoc = getDocument("payment_intents", intentId);
   const finalIntent = finalIntentDoc ? decodeFirestoreFields(finalIntentDoc.fields || {}) : {};
-  const txs = listDocuments("transactions", 500).filter(function(x) {
-    return String(x.data.payment_intent_id || "") === intentId;
-  });
-  const pays = listDocuments("payments", 500).filter(function(x) {
-    return String(x.data.payment_intent_id || "") === intentId;
-  });
-  const tickets = listDocuments("tickets", 500).filter(function(x) {
-    return String(x.data.payment_intent_id || "") === intentId;
-  });
+  const txs = queryCollectionByField_("transactions", "payment_intent_id", intentId, 10);
+  const pays = queryCollectionByField_("payments", "payment_intent_id", intentId, 10);
+  const tickets = queryCollectionByField_("tickets", "payment_intent_id", intentId, 10);
 
   addCheck("Final intent SUCCEEDED", String(finalIntent.status || "") === "SUCCEEDED", "status=" + String(finalIntent.status || "-"));
   addCheck("Exactly one PAID transaction", txs.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; }).length === 1, "PAID transactions=" + txs.filter(function(x){ return String(x.data.status || "").toUpperCase() === "PAID"; }).length);
@@ -3244,10 +3234,10 @@ function processSandboxWebhookLifecycleTest(body) {
   };
 }
 
-function processSandboxCreateOrder(body) {
-  if (!body.idToken) throw new Error("Firebase ID token wajib.");
-  const authUser = verifyFirebaseIdToken(body.idToken);
-  const admin = getAdminProfile(authUser.uid);
+function processSandboxCreateOrder(body, trustedAuthUser) {
+  if (!body.idToken && !trustedAuthUser) throw new Error("Firebase ID token wajib.");
+  const authUser = trustedAuthUser || verifyFirebaseIdToken(body.idToken);
+  const admin = trustedAuthUser ? {active:true} : getAdminProfile(authUser.uid);
   if (!admin || admin.active !== true) {
     throw new Error("Akun tidak memiliki akses admin BeePay.");
   }
@@ -3552,10 +3542,10 @@ function processSandboxPaymentIntentLifecycleTest(body) {
   };
 }
 
-function processCreatePaymentIntent(body) {
-  if (!body.idToken) throw new Error("Firebase ID token wajib.");
-  const authUser = verifyFirebaseIdToken(body.idToken);
-  const admin = getAdminProfile(authUser.uid);
+function processCreatePaymentIntent(body, trustedAuthUser) {
+  if (!body.idToken && !trustedAuthUser) throw new Error("Firebase ID token wajib.");
+  const authUser = trustedAuthUser || verifyFirebaseIdToken(body.idToken);
+  const admin = trustedAuthUser ? {active:true} : getAdminProfile(authUser.uid);
   if (!admin || admin.active !== true) {
     throw new Error("Akun tidak memiliki akses admin BeePay.");
   }
@@ -3593,9 +3583,8 @@ function processCreatePaymentIntent(body) {
 
   // Idempotency: the same key returns the existing intent instead of
   // creating a second intent. This is read-only until the final write.
-  const existing = listDocuments("payment_intents", 200).find(function(item) {
-    return String(item.data.idempotency_key || "") === idempotencyKey;
-  });
+  const existingMatches = queryCollectionByField_("payment_intents", "idempotency_key", idempotencyKey, 5);
+  const existing = existingMatches.length ? existingMatches[0] : null;
   if (existing) {
     const existingData = existing.data;
     if (
