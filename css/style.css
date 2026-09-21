@@ -7,3 +7,5 @@
 .auth-panel .auth-actions{margin-top:10px}
 
 .audit-actions{margin-top:16px;display:grid;gap:10px}.audit-output{white-space:pre-wrap;min-height:24px}#sandboxAuditBtn{width:max-content}
+
+.final-test-actions{align-items:stretch}.final-test-actions button{min-width:220px}.final-test-actions button:disabled{opacity:.55;cursor:wait}.final-test-output{white-space:pre-wrap;line-height:1.45;padding:10px 0}
