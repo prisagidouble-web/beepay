@@ -111,6 +111,11 @@ function doPost(e) {
         return processSandboxReconciliationIntegrityTest(body);
       }));
     }
+    if (body.action === "sandbox_missing_receipt_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxMissingReceiptTest(body);
+      }));
+    }
     if (body.action === "reconciliation_query") {
       return jsonResponse(processReconciliationQuery(body));
     }
@@ -1242,7 +1247,19 @@ function processPaymentReconciliationStatus(body){
   // This keeps reconciliation reads bounded to the selected Payment Intent.
   const txs=queryCollectionByField_("transactions","payment_intent_id",intentId,10);
   const pays=queryCollectionByField_("payments","payment_intent_id",intentId,10);
-  const receipts=queryCollectionByField_("payment_receipts","payment_intent_id",intentId,10);
+
+  // Receipt IDs are deterministic (RCP-<paymentIntentId>). Prefer the
+  // canonical document lookup so reconciliation does not depend on a
+  // payment_receipts field query/index. This is still a single bounded read.
+  // Keep the field-query as a fallback/duplicate detector when available.
+  let receipts=queryCollectionByField_("payment_receipts","payment_intent_id",intentId,10);
+  if(receipts.length===0){
+    const canonicalReceiptId="RCP-"+intentId;
+    const receiptDoc=getDocument("payment_receipts",canonicalReceiptId);
+    if(receiptDoc && receiptDoc.fields){
+      receipts=[{id:canonicalReceiptId,data:decodeFirestoreFields(receiptDoc.fields||{})}];
+    }
+  }
   const integrity=buildReconciliationIntegrity_(intent,txs,pays,receipts);
 
   return {
@@ -1256,6 +1273,97 @@ function processPaymentReconciliationStatus(body){
     reconciled:integrity.reconciled,integrity:integrity.integrity,integrityCodes:integrity.integrityCodes,
     checks:integrity.checks,credentialValuesExposed:false,timestamp:new Date().toISOString()
   };
+}
+
+/**
+ * Phase 23.5.1 PATCH2 — controlled negative test.
+ * Creates a temporary trusted SANDBOX Intent + PAID Transaction + PAID Payment
+ * without creating a receipt, verifies reconciliation rejects the state, then
+ * removes the temporary documents. The golden PASS specimen is never touched.
+ */
+function processSandboxMissingReceiptTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Reconciliation.");
+
+  const stamp=Date.now();
+  const intentId="PI-MR-2351-"+stamp;
+  const txId="SBX-MR-TX-"+stamp;
+  const paymentId="SBX-MR-PAY-"+stamp;
+  const orderId="ORDER-MR-2351-"+stamp;
+  const eventId="SANDBOX-MISSING-RECEIPT-2351";
+  const userId="TEST-USER-2351";
+  const amount=123000;
+  const providerReference="SANDBOX-MR-2351-"+stamp;
+  const now=new Date().toISOString();
+  const created=[];
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  function deleteDocument_(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
+    const response=UrlFetchApp.fetch(url,options);
+    const code=response.getResponseCode();
+    if(code<200 || code>=300) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
+  }
+
+  try {
+    createDocument("payment_intents",intentId,{
+      payment_intent_id:str(intentId),order_id:str(orderId),user_id:str(userId),merchant_id:str("SANDBOX-MISSING-RECEIPT"),
+      event_id:str(eventId),payment_method_id:str("PM-MISSING-RECEIPT"),amount:integer(amount),currency:str("IDR"),
+      channel:str("QRIS"),provider:str("SANDBOX-PJP"),provider_adapter:str("SANDBOX-PJP"),routing_id:str("SANDBOX-PJP-QRIS"),
+      client_reference:str("MISSING-RECEIPT-2351"),idempotency_key:str("IDEMP-MISSING-RECEIPT-2351-"+stamp),
+      status:str("SUCCEEDED"),provider_reference:str(providerReference),trusted:boolean(true),production:boolean(false),
+      created_by:str(authUser.uid),created_by_backend:boolean(true),created_at:timestamp(now),updated_at:timestamp(now)
+    });
+    created.push(["payment_intents",intentId]);
+
+    createDocument("transactions",txId,{
+      transaction_id:str(txId),order_id:str(orderId),payment_intent_id:str(intentId),event_id:str(eventId),user_id:str(userId),
+      amount:integer(amount),currency:str("IDR"),status:str("PAID"),channel:str("QRIS"),provider_reference:str(providerReference),
+      trusted:boolean(true),production:boolean(false),created_at:timestamp(now),updated_at:timestamp(now),paid_at:timestamp(now)
+    });
+    created.push(["transactions",txId]);
+
+    createDocument("payments",paymentId,{
+      payment_id:str(paymentId),transaction_id:str(txId),payment_intent_id:str(intentId),order_id:str(orderId),event_id:str(eventId),
+      user_id:str(userId),amount:integer(amount),currency:str("IDR"),status:str("PAID"),provider:str("SANDBOX-PJP"),
+      provider_reference:str(providerReference),channel:str("QRIS"),trusted:boolean(true),production:boolean(false),
+      created_at:timestamp(now),updated_at:timestamp(now),paid_at:timestamp(now)
+    });
+    created.push(["payments",paymentId]);
+
+    const status=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
+    addCheck("Temporary sandbox intent created",status.status==="SUCCEEDED",status.status);
+    addCheck("Exactly one PAID transaction",status.transactionCount===1,String(status.transactionCount));
+    addCheck("Exactly one PAID payment",status.paymentCount===1,String(status.paymentCount));
+    addCheck("Receipt is intentionally missing",status.receiptCount===0,String(status.receiptCount));
+    addCheck("Reconciliation is rejected",status.reconciled===false,"reconciled="+status.reconciled);
+    addCheck("Integrity is INCONSISTENT",status.integrity==="INCONSISTENT",status.integrity);
+    addCheck("ONE_RECEIPT integrity code is raised",(status.integrityCodes||[]).indexOf("ONE_RECEIPT")!==-1,JSON.stringify(status.integrityCodes||[]));
+    addCheck("Live bank remains disabled",status.liveBankCalled===false,"liveBankCalled=false");
+    addCheck("Credential values are not exposed",status.credentialValuesExposed===false,"credentialValuesExposed=false");
+
+    const passCount=checks.filter(function(x){return x.pass;}).length;
+    const failCount=checks.length-passCount;
+    return {
+      success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,
+      test:"MISSING_RECEIPT_RECONCILIATION_23_5_1",overall:failCount===0?"PASS":"FAIL",
+      passCount:passCount,failCount:failCount,checked:checks.length,paymentIntentId:intentId,
+      transactionId:txId,paymentId:paymentId,receiptId:"RCP-"+intentId,receiptCreated:false,checks:checks,
+      message:failCount===0
+        ?"Missing Receipt Test PASS: reconciliation menolak state tanpa receipt dan integrity code ONE_RECEIPT terdeteksi."
+        :"Missing Receipt Test FAIL: periksa checks.",timestamp:new Date().toISOString()
+    };
+  } finally {
+    // Best-effort cleanup so this negative test leaves no operational records.
+    for(let i=created.length-1;i>=0;i--){
+      try{deleteDocument_(created[i][0],created[i][1]);}catch(e){Logger.log("Cleanup failed: "+created[i][0]+"/"+created[i][1]+" "+e.message);}
+    }
+  }
 }
 
 function processSandboxReconciliationIntegrityTest(body){
