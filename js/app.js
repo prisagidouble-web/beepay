@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"23.4.2",
+version:"23.4.3",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -205,7 +205,38 @@ const action=document.getElementById("auditAction").value.trim(),target=document
 const id=`AUD-${Date.now()}`,data={audit_id:id,actor_uid:currentUser.uid,action,target_id:target,severity,source:"admin-ui",trusted:false,created_at:serverTimestamp()};
 try{await addDoc(collection(db,"audit_logs"),data);document.getElementById("auditForm").reset();m.textContent=`Audit ${id} dicatat.`;await this.loadAudits()}catch(e){m.textContent="Gagal mencatat audit: "+e.message}},
 async loadAudits(){const list=document.getElementById("auditList");if(!db||!list)return;try{const s=await getDocs(query(collection(db,"audit_logs"),orderBy("created_at","desc"),limit(20)));if(s.empty){list.innerHTML='<div class="intent-card">Belum ada audit event.</div>';return}list.innerHTML=s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.action||"-")}</h3><div class="meta">${this.escape(x.audit_id||"-")} · Target: ${this.escape(x.target_id||"-")} · Actor: ${this.escape(x.actor_uid||"-")}</div></div><span class="status">${this.escape(x.severity||"-")}</span></article>`}).join("")}catch(e){list.innerHTML='<div class="intent-card">Audit log belum dapat dibaca.</div>'}},
-async loadReconciliation(){const list=document.getElementById("reconList"),summary=document.getElementById("reconSummary");if(!db||!list)return;const eventFilter=document.getElementById("reconEventId")?.value.trim()||"",statusFilter=document.getElementById("reconStatus")?.value||"";try{const s=await getDocs(query(collection(db,"transactions"),orderBy("created_at","desc"),limit(50)));let rows=s.docs.map(d=>d.data()).filter(x=>(!eventFilter||x.event_id===eventFilter)&&(!statusFilter||x.status===statusFilter));let total=0,paid=0,pending=0,failed=0;rows.forEach(x=>{const a=Number(x.amount||0);total+=a;if(x.status==="PAID")paid+=a;if(x.status==="PENDING")pending+=a;if(x.status==="FAILED")failed+=a});summary.innerHTML=`<div class="summary-card"><b>${rows.length}</b><span>Transaksi</span></div><div class="summary-card"><b>${total.toLocaleString("id-ID")} IDR</b><span>Total ledger</span></div><div class="summary-card"><b>${paid.toLocaleString("id-ID")} IDR</b><span>PAID</span></div><div class="summary-card"><b>${pending.toLocaleString("id-ID")} IDR</b><span>PENDING</span></div>`;if(!rows.length){list.innerHTML='<div class="intent-card">Tidak ada transaksi sesuai filter.</div>';return}list.innerHTML=rows.map(x=>`<article class="intent-card"><div><h3>${this.escape(x.transaction_id||"-")}</h3><div class="meta">Event: ${this.escape(x.event_id||"-")} · Order: ${this.escape(x.order_id||"-")} · Ref: ${this.escape(x.reference||"-")}</div></div><div><b>${this.escape(String(x.amount||0))} ${this.escape(x.currency||"IDR")}</b><div class="meta">${this.escape(x.status||"-")}</div></div></article>`).join("")}catch(e){summary.innerHTML="";list.innerHTML='<div class="intent-card">Rekonsiliasi belum dapat dibaca. Periksa akses Firestore atau index.</div>'}},
+async loadReconciliation(){
+const list=document.getElementById("reconList"),summary=document.getElementById("reconSummary");
+if(!list||!currentUser){if(list)list.innerHTML='<div class="intent-card">Login terlebih dahulu.</div>';return}
+if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){list.innerHTML='<div class="intent-card">API Apps Script belum dikonfigurasi.</div>';if(summary)summary.innerHTML="";return}
+const eventFilter=document.getElementById("reconEventId")?.value.trim()||"";
+const statusFilter=document.getElementById("reconStatus")?.value||"";
+try{
+  const idToken=await currentUser.getIdToken(true);
+  const response=await fetch(config.API_URL,{
+    method:"POST",
+    headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body:JSON.stringify({
+      action:"reconciliation_query",
+      idToken,
+      eventId:eventFilter,
+      status:statusFilter,
+      limit:20
+    })
+  });
+  const result=await response.json();
+  if(!result.success)throw new Error(result.error||"Rekonsiliasi gagal.");
+  const rows=Array.isArray(result.rows)?result.rows:[];
+  const s=result.summary||{};
+  summary.innerHTML=`<div class="summary-card"><b>${Number(s.count||rows.length)}</b><span>Transaksi</span></div><div class="summary-card"><b>${Number(s.total||0).toLocaleString("id-ID")} IDR</b><span>Total ledger</span></div><div class="summary-card"><b>${Number(s.paid||0).toLocaleString("id-ID")} IDR</b><span>PAID</span></div><div class="summary-card"><b>${Number(s.pending||0).toLocaleString("id-ID")} IDR</b><span>PENDING</span></div>`;
+  if(!rows.length){list.innerHTML='<div class="intent-card">Tidak ada transaksi sesuai filter.</div>';return}
+  list.innerHTML=rows.map(x=>`<article class="intent-card"><div><h3>${this.escape(x.transaction_id||"-")}</h3><div class="meta">Event: ${this.escape(x.event_id||"-")} · Order: ${this.escape(x.order_id||"-")} · Ref: ${this.escape(x.reference||x.provider_reference||"-")}</div></div><div><b>${this.escape(String(x.amount||0))} ${this.escape(x.currency||"IDR")}</b><div class="meta">${this.escape(x.status||"-")}</div></div></article>`).join("");
+}catch(e){
+  console.error("Reconciliation backend query:",e);
+  summary.innerHTML="";
+  list.innerHTML='<div class="intent-card">Rekonsiliasi gagal dimuat: '+this.escape(e.message||"Unknown error")+'</div>';
+}
+},
 async createTicketRecord(){const m=document.getElementById("ticketMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}
 const orderId=document.getElementById("ticketOrderId").value.trim(),transactionId=document.getElementById("ticketTransactionId").value.trim(),userId=document.getElementById("ticketUserId").value.trim(),eventId=document.getElementById("ticketEventId").value.trim();
 if(!orderId||!transactionId||!userId||!eventId){m.textContent="Order, Transaction, User dan Event wajib diisi.";return}
