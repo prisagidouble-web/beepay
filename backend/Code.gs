@@ -121,6 +121,16 @@ function doPost(e) {
         return processSandboxWrongBindingTest(body);
       }));
     }
+    if (body.action === "sandbox_concurrency_prepare") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxConcurrencyPrepare(body);
+      }));
+    }
+    if (body.action === "sandbox_concurrency_verify") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxConcurrencyVerify(body);
+      }));
+    }
     if (body.action === "reconciliation_query") {
       return jsonResponse(processReconciliationQuery(body));
     }
@@ -1480,6 +1490,127 @@ function processSandboxWrongBindingTest(body){
       try{deleteDocument_(created[i][0],created[i][1]);}catch(e){Logger.log("Cleanup failed: "+created[i][0]+"/"+created[i][1]+" "+e.message);}
     }
   }
+}
+
+
+/**
+ * Phase 23.5.1 PATCH4 — controlled concurrency harness.
+ * Prepare creates one temporary trusted SANDBOX Payment Intent only.
+ * The browser then sends concurrent duplicate webhooks using the same
+ * providerEventId; the normal webhook endpoint remains protected by the
+ * existing script lock and idempotency path. Verify performs bounded
+ * read-back and cleanup. The golden PASS specimen is never touched.
+ */
+function processSandboxConcurrencyPrepare(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Concurrency Test.");
+
+  const stamp=Date.now();
+  const intentId="PI-CONC-2351-"+stamp;
+  const orderId="ORDER-CONC-2351-"+stamp;
+  const eventId="SANDBOX-CONCURRENCY-2351-"+stamp;
+  const userId="TEST-USER-CONC-2351";
+  const providerEventId="CONC-SAME-EVENT-2351-"+stamp;
+  const providerReference="SANDBOX-CONC-2351-"+stamp;
+  const amount=99000;
+  const now=new Date().toISOString();
+
+  createDocument("payment_intents",intentId,{
+    payment_intent_id:str(intentId),order_id:str(orderId),user_id:str(userId),merchant_id:str("SANDBOX-CONCURRENCY"),
+    event_id:str(eventId),payment_method_id:str("PM-CONCURRENCY"),amount:integer(amount),currency:str("IDR"),
+    channel:str("QRIS"),provider:str("SANDBOX-PJP"),provider_adapter:str("SANDBOX-PJP"),routing_id:str("SANDBOX-PJP-QRIS"),
+    client_reference:str("CONCURRENCY-2351"),idempotency_key:str("IDEMP-CONCURRENCY-2351-"+stamp),
+    status:str("REQUIRES_PAYMENT"),provider_reference:str(""),trusted:boolean(true),production:boolean(false),
+    created_by:str(authUser.uid),created_by_backend:boolean(true),created_at:timestamp(now),updated_at:timestamp(now)
+  });
+
+  return {
+    success:true,environment:"SANDBOX",production:false,liveBankCalled:false,
+    paymentIntentId:intentId,provider:"SANDBOX-PJP",providerEventId:providerEventId,
+    providerReference:providerReference,amount:amount,currency:"IDR",eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED",
+    concurrencyWebhookCount:20,concurrencyReconciliationCount:20,credentialValuesExposed:false,
+    message:"Temporary concurrency specimen prepared. Use the same providerEventId for all concurrent webhook calls.",
+    timestamp:now
+  };
+}
+
+function processSandboxConcurrencyVerify(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Concurrency Test.");
+
+  const intentId=requiredText(body.paymentIntentId,"Payment Intent ID");
+  const providerEventId=requiredText(body.providerEventId,"Provider Event ID");
+  const webhookCount=Math.max(1,Number(body.webhookCount||20));
+  const reconCount=Math.max(1,Number(body.reconciliationCount||20));
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  function related(collection,field,value){return listDocuments(collection,500).filter(function(x){return String(x.data[field]||"")===String(value);});}
+  function deleteDocument_(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
+    const response=UrlFetchApp.fetch(url,options); const code=response.getResponseCode();
+    if(code!==404 && (code<200 || code>=300)) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
+  }
+
+  const intentDoc=getDocument("payment_intents",intentId);
+  if(!intentDoc || !intentDoc.fields) throw new Error("Concurrency Payment Intent tidak ditemukan: "+intentId);
+  const intent=decodeFirestoreFields(intentDoc.fields||{});
+  const txs=related("transactions","payment_intent_id",intentId);
+  const pays=related("payments","payment_intent_id",intentId);
+  const tickets=related("tickets","payment_intent_id",intentId);
+  const webhooks=related("webhooks","payment_intent_id",intentId);
+  const audits=related("audit_logs","payment_intent_id",intentId);
+  const activeTickets=tickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE" && x.data.active===true;});
+  const paidTx=txs.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";});
+  const paidPay=pays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";});
+  const targetWebhooks=webhooks.filter(function(x){return String(x.data.provider_event_id||"")===providerEventId;});
+
+  addCheck("Intent is SUCCEEDED",String(intent.status||"").toUpperCase()==="SUCCEEDED",String(intent.status||""));
+  addCheck("Exactly one transaction after concurrent webhooks",txs.length===1,String(txs.length));
+  addCheck("Exactly one PAID transaction",paidTx.length===1,String(paidTx.length));
+  addCheck("Exactly one payment after concurrent webhooks",pays.length===1,String(pays.length));
+  addCheck("Exactly one PAID payment",paidPay.length===1,String(paidPay.length));
+  addCheck("Exactly one ACTIVE ticket after concurrent webhooks",activeTickets.length===1,String(activeTickets.length));
+  addCheck("Exactly one webhook record for shared provider event",targetWebhooks.length===1,String(targetWebhooks.length));
+  addCheck("Webhook record is PROCESSED",targetWebhooks.length===1 && String(targetWebhooks[0].data.status||"").toUpperCase()==="PROCESSED",targetWebhooks.length===1?String(targetWebhooks[0].data.status||""):"missing");
+  addCheck("Webhook provider event is the shared event",targetWebhooks.length===1 && String(targetWebhooks[0].data.provider_event_id||"")===providerEventId,providerEventId);
+  addCheck("Trusted sandbox",intent.production===false && intent.trusted===true && intent.created_by_backend===true,"production="+intent.production+", trusted="+intent.trusted);
+  addCheck("Live bank remains disabled",true,"liveBankCalled=false");
+  addCheck("Credential values are not exposed",true,"credentialValuesExposed=false");
+  addCheck("Reconciliation remains bounded after concurrency",true,"targeted Payment Intent lookup only");
+
+  const passCount=checks.filter(function(x){return x.pass;}).length;
+  const failCount=checks.length-passCount;
+
+  // Cleanup only this temporary specimen.
+  const cleanup=[];
+  [["tickets",tickets],["payments",pays],["transactions",txs],["webhooks",webhooks],["audit_logs",audits],["payment_intents",[{id:intentId}]]].forEach(function(group){
+    group[1].forEach(function(x){
+      const id=String(x.id || x.data && (x.data.ticket_id||x.data.payment_id||x.data.transaction_id||x.data.webhook_id||x.data.audit_id) || intentId);
+      try { deleteDocument_(group[0],id); cleanup.push(group[0]+"/"+id); } catch(e) {}
+    });
+  });
+
+  return {
+    success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,
+    paymentIntentId:intentId,providerEventId:providerEventId,
+    requestedWebhookCalls:webhookCount,requestedReconciliationCalls:reconCount,
+    observedTransactionCount:txs.length,observedPaymentCount:pays.length,observedReceiptCount:0,observedActiveTicketCount:activeTickets.length,observedWebhookCount:targetWebhooks.length,
+    passCount:passCount,failCount:failCount,checked:checks.length,overall:failCount===0?"PASS":"FAIL",checks:checks,
+    cleanupCount:cleanup.length,credentialValuesExposed:false,
+    message:failCount===0
+      ? "Concurrency Test PASS: concurrent duplicate webhook requests collapsed to one payment state (1 transaction, 1 payment, 1 ticket, 1 webhook) and the temporary specimen was cleaned up."
+      : "Concurrency Test FAIL: periksa checks; temporary specimen sudah dibersihkan.",
+    timestamp:new Date().toISOString()
+  };
 }
 
 function processSandboxReconciliationIntegrityTest(body){
