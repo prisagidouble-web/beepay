@@ -12,6 +12,7 @@
  * Phase 23.1.0 adds merchant registry and API authentication boundary.
  * Phase 23.1.1 fixes sandbox merchant registry Firestore array encoding.
  * Phase 23.5.1 adds Recovery & Replay final sandbox verification.
+ * Phase 23.5.2 adds high-traffic read hardening and bounded reconciliation lookups.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -20,7 +21,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.1";
+const BEEPAY_VERSION = "23.5.2";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
