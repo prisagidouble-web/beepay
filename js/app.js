@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"23.3.2",
+version:"23.4.0",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -22,7 +22,15 @@ document.getElementById("rolePanel").hidden=!yes;
 document.getElementById("paymentProcessing").hidden=!yes;
 if(document.getElementById("sandboxOrderPanel"))document.getElementById("sandboxOrderPanel").hidden=!yes;
 if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;if(document.getElementById("paymentRoutingPanel"))document.getElementById("paymentRoutingPanel").hidden=!yes;if(document.getElementById("paymentReconciliationPanel"))document.getElementById("paymentReconciliationPanel").hidden=!yes;if(document.getElementById("merchantContractPanel"))document.getElementById("merchantContractPanel").hidden=!yes;if(document.getElementById("universalPaymentApiPanel"))document.getElementById("universalPaymentApiPanel").hidden=!yes;if(document.getElementById("merchantRegistryPanel"))document.getElementById("merchantRegistryPanel").hidden=!yes;if(document.getElementById("paymentIntentLifecyclePanel"))document.getElementById("paymentIntentLifecyclePanel").hidden=!yes;
-if(!yes){document.getElementById("authMessage").textContent="Belum login.";return}
+if(!yes){
+if(this.lazyReadObserver){
+  try{this.lazyReadObserver.disconnect()}catch(_){}
+  this.lazyReadObserver=null;
+}
+this.lazyReadLoaded=new Set();
+document.getElementById("authMessage").textContent="Belum login.";
+return
+}
 try{
   const snap=await getDoc(doc(db,"admin_users",u.uid));
   if(!snap.exists()){
@@ -42,13 +50,80 @@ try{
   document.getElementById("authMessage").textContent="Login admin berhasil.";
   document.getElementById("adminName").textContent=profile.name||u.displayName||u.email||"Admin";
   document.getElementById("adminRole").textContent=`Role: ${profile.role||"ADMIN"}`;
-  await this.loadIntents();await this.loadCheckouts();await this.loadWebhooks();await this.loadVerifications();await this.loadResults();await this.loadTickets();await this.loadReconciliation();await this.loadAudits();await this.loadSandboxRuns();await this.loadFailureTests();await this.loadHealthChecks();await this.loadFinalAudits();
+  this.setupLazyAdminReads();
+
 }catch(e){
   console.error(e);
   document.getElementById("authMessage").textContent="Gagal memuat profil admin.";
   await signOut(auth);
 }
 })},
+setupLazyAdminReads(){
+  // Avoid a 12-collection read burst immediately after login.
+  // Each list is fetched once, when it approaches the viewport.
+  // User-triggered actions may still call their normal loadX() methods.
+  if(this.lazyReadObserver){
+    try{this.lazyReadObserver.disconnect()}catch(_){}
+  }
+  this.lazyReadLoaded=new Set();
+
+  const jobs=[
+    ["intentList","loadIntents"],
+    ["checkoutList","loadCheckouts"],
+    ["webhookList","loadWebhooks"],
+    ["verificationList","loadVerifications"],
+    ["resultList","loadResults"],
+    ["ticketList","loadTickets"],
+    ["reconList","loadReconciliation"],
+    ["auditList","loadAudits"],
+    ["sandboxList","loadSandboxRuns"],
+    ["failureTestList","loadFailureTests"],
+    ["healthList","loadHealthChecks"],
+    ["auditChecklistList","loadFinalAudits"]
+  ];
+
+  const loadJob=(element,methodName)=>{
+    if(!element || this.lazyReadLoaded.has(methodName))return;
+    this.lazyReadLoaded.add(methodName);
+    Promise.resolve().then(()=>this[methodName]()).catch(e=>{
+      console.error("Lazy read error:",methodName,e);
+      this.lazyReadLoaded.delete(methodName);
+    });
+  };
+
+  if("IntersectionObserver" in window){
+    this.lazyReadObserver=new IntersectionObserver(entries=>{
+      entries.forEach(entry=>{
+        if(!entry.isIntersecting)return;
+        const methodName=entry.target.dataset.beepayLazyRead;
+        loadJob(entry.target,methodName);
+        this.lazyReadObserver.unobserve(entry.target);
+      });
+    },{
+      root:null,
+      rootMargin:"300px 0px 300px 0px",
+      threshold:0.01
+    });
+
+    jobs.forEach(([elementId,methodName])=>{
+      const element=document.getElementById(elementId);
+      if(!element)return;
+      element.dataset.beepayLazyRead=methodName;
+      this.lazyReadObserver.observe(element);
+    });
+  }else{
+    // Older browsers: retain compatibility, but schedule reads with a small
+    // stagger so login does not create a single synchronous burst.
+    let delay=0;
+    jobs.forEach(([elementId,methodName])=>{
+      const element=document.getElementById(elementId);
+      if(!element)return;
+      element.dataset.beepayLazyRead=methodName;
+      setTimeout(()=>loadJob(element,methodName),delay);
+      delay+=250;
+    });
+  }
+},
 async login(){
 if(!auth)return alert("Firebase belum dikonfigurasi.");
 const email=document.getElementById("adminEmail")?.value.trim();
@@ -65,7 +140,14 @@ try{
   msg.textContent=map[e.code]||("Login gagal: "+e.message);
 }
 },
-async logout(){if(auth)await signOut(auth)},
+async logout(){
+if(this.lazyReadObserver){
+  try{this.lazyReadObserver.disconnect()}catch(_){}
+  this.lazyReadObserver=null;
+}
+this.lazyReadLoaded=new Set();
+if(auth)await signOut(auth)
+},
 bindIntent(){document.getElementById("intentForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createIntent()});document.getElementById("sandboxOrderBtn")?.addEventListener("click",()=>this.createSandboxOrder());document.getElementById("bindingAuditBtn")?.addEventListener("click",()=>this.runBindingAudit());document.getElementById("idempotencyTestBtn")?.addEventListener("click",()=>this.runIdempotencyTest())},
 bindCheckout(){document.getElementById("checkoutForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createCheckout()})},
 bindWebhook(){document.getElementById("webhookForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.createWebhookLedger()})},bindWebhookSimulation(){document.getElementById("webhookSimulationForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runWebhookSimulation()});document.getElementById("webhookLifecycleTestBtn")?.addEventListener("click",()=>this.runWebhookLifecycleTest())},bindProviderAdapter(){document.getElementById("providerAdapterTestBtn")?.addEventListener("click",()=>this.runProviderAdapterTest())},
