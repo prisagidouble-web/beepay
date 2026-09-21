@@ -1735,7 +1735,12 @@ function processSandboxRecoveryReplayTest(body){
   const userId="TEST-USER-RR-2351-"+stamp;
   const amount=123000;
   const provider="SANDBOX-PJP";
-  const providerReference="SANDBOX-RR-2351-"+stamp;
+  // Each provider event gets its own provider reference. Reusing the same
+  // reference across PROCESSING -> SUCCEEDED would correctly trigger the
+  // provider-reference collision guard in processSandboxWebhook().
+  const providerReferenceProcessing="SANDBOX-RR-2351-PROC-"+stamp;
+  const providerReferenceSuccess="SANDBOX-RR-2351-SUCC-"+stamp;
+  const providerReferenceLate="SANDBOX-RR-2351-LATE-"+stamp;
   const providerEventProcessing="RR-PROCESSING-2351-"+stamp;
   const providerEventSuccess="RR-SUCCESS-2351-"+stamp;
   const providerEventLate="RR-LATE-2351-"+stamp;
@@ -1773,17 +1778,17 @@ function processSandboxRecoveryReplayTest(body){
     });
     addCheck("Temporary intent created as REQUIRES_PAYMENT",true,intentId);
 
-    const base={idToken:body.idToken,paymentIntentId:intentId,provider:provider,providerReference:providerReference,currency:"IDR",amount:amount,targetStatus:"PROCESSING",signatureValid:true,payloadHash:"RR-HASH-2351"};
-    const processing=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventProcessing,eventType:"PAYMENT_PROCESSING"}));
+    const base={idToken:body.idToken,paymentIntentId:intentId,provider:provider,currency:"IDR",amount:amount,targetStatus:"PROCESSING",signatureValid:true,payloadHash:"RR-HASH-2351"};
+    const processing=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventProcessing,eventType:"PAYMENT_PROCESSING",providerReference:providerReferenceProcessing}));
     addCheck("PROCESSING webhook accepted",processing.success===true && processing.existing!==true,processing.message||"");
 
-    const success=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED"}));
+    const success=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED",providerReference:providerReferenceSuccess}));
     addCheck("First SUCCEEDED webhook accepted",success.success===true && success.existing!==true,success.message||"");
 
-    const duplicate=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED"}));
+    const duplicate=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED",providerReference:providerReferenceSuccess}));
     addCheck("Duplicate SUCCEEDED webhook is idempotent",duplicate.success===true && duplicate.existing===true && duplicate.idempotent===true,duplicate.message||"");
 
-    const late=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventLate,eventType:"PAYMENT_PROCESSING",targetStatus:"PROCESSING",providerReference:providerReference+"-LATE"}));
+    const late=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventLate,eventType:"PAYMENT_PROCESSING",targetStatus:"PROCESSING",providerReference:providerReferenceLate}));
     addCheck("Late/out-of-order PROCESSING webhook is rejected",late.rejected===true && late.reason==="OUT_OF_ORDER_TERMINAL_STATE",late.reason||"");
 
     const statusAfterReplay=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
