@@ -4,7 +4,7 @@ import{getFirestore,collection,addDoc,getDocs,getDoc,doc,limit,query,orderBy,ser
 import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
-version:"23.4.3",
+version:"23.4.4",
 async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
@@ -60,8 +60,9 @@ try{
 })},
 setupLazyAdminReads(){
   // Avoid a 12-collection read burst immediately after login.
-  // Each list is fetched once, when it approaches the viewport.
+  // Each non-sensitive list is fetched once, when it approaches the viewport.
   // User-triggered actions may still call their normal loadX() methods.
+  // Reconciliation is excluded from this observer and remains button-triggered.
   if(this.lazyReadObserver){
     try{this.lazyReadObserver.disconnect()}catch(_){}
   }
@@ -74,7 +75,8 @@ setupLazyAdminReads(){
     ["verificationList","loadVerifications"],
     ["resultList","loadResults"],
     ["ticketList","loadTickets"],
-    ["reconList","loadReconciliation"],
+    // Reconciliation is intentionally manual-trigger only.
+    // It queries the financial ledger through the trusted backend.
     ["auditList","loadAudits"],
     ["sandboxList","loadSandboxRuns"],
     ["failureTestList","loadFailureTests"],
