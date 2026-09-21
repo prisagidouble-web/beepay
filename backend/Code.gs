@@ -1791,14 +1791,18 @@ function processSandboxRecoveryReplayTest(body){
     const late=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventLate,eventType:"PAYMENT_PROCESSING",targetStatus:"PROCESSING",providerReference:providerReferenceLate}));
     addCheck("Late/out-of-order PROCESSING webhook is rejected",late.rejected===true && late.reason==="OUT_OF_ORDER_TERMINAL_STATE",late.reason||"");
 
+    // A successful payment may legitimately have no receipt yet. Reconciliation
+    // therefore becomes CONSISTENT only after the canonical receipt exists.
+    // Prepare the normal receipt before asserting post-replay consistency.
+    const receipt1=ensureSandboxReceiptForIntent_(intentId);
+    addCheck("Receipt preparation after replay succeeds",!!receipt1.receiptId,receipt1.receiptId||"");
+
     const statusAfterReplay=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
     addCheck("Replay leaves reconciliation consistent",statusAfterReplay.reconciled===true,statusAfterReplay.integrity||"");
     addCheck("Exactly one PAID transaction after replay",statusAfterReplay.transactionCount===1,String(statusAfterReplay.transactionCount));
     addCheck("Exactly one PAID payment after replay",statusAfterReplay.paymentCount===1,String(statusAfterReplay.paymentCount));
     addCheck("Exactly one ACTIVE ticket after replay",related_("tickets").filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length===1,String(related_("tickets").filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length));
 
-    const receipt1=ensureSandboxReceiptForIntent_(intentId);
-    addCheck("Receipt recovery preparation succeeds",!!receipt1.receiptId,receipt1.receiptId||"");
     const receiptId="RCP-"+intentId;
     deleteDocument_("payment_receipts",receiptId);
     const missingStatus=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
