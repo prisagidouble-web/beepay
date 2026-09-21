@@ -9,7 +9,11 @@ let db = null
 const READ_CACHE_TTL_MS = 15000;
 const BeePay = {
     version: "23.5.1",
-    async init() {
+    init() {
+        // Global singleton guard: protects against duplicate module/script loading.
+        if (window.__BeePayInitPromise)
+            return window.__BeePayInitPromise;
+        const run = async () => {
         document.getElementById("systemStatus").textContent = "Online";
         this.bindAuth();
         this.bindIntent();
@@ -42,7 +46,10 @@ const BeePay = {
         this.bindHealth();
         this.bindFinalAudit();
         await this.checkAPI();
-        await this.initFirebase()
+        await this.initFirebase();
+        };
+        window.__BeePayInitPromise = run();
+        return window.__BeePayInitPromise;
     },
     async checkAPI() {
         const e = document.getElementById("apiStatus");
@@ -61,6 +68,8 @@ const BeePay = {
     },
     async initFirebase() {
         const e = document.getElementById("firebaseStatus");
+        if (window.__BeePayFirebaseReady)
+            return;
         if (!config?.FIREBASE?.projectId || config.FIREBASE.projectId.startsWith("YOUR_")) {
             e.textContent = "Not Configured";
             return
@@ -69,6 +78,7 @@ const BeePay = {
             initializeApp(config.FIREBASE);
             db = getFirestore();
             auth = getAuth();
+            window.__BeePayFirebaseReady = true;
             e.textContent = "Connected";
             this.watchAuth()
         } catch (x) {
@@ -121,7 +131,9 @@ const BeePay = {
         document.getElementById("logoutButton")?.addEventListener("click", () => this.logout())
     },
     watchAuth() {
-        onAuthStateChanged(auth, async u => {
+        if (window.__BeePayAuthUnsubscribe)
+            return;
+        window.__BeePayAuthUnsubscribe = onAuthStateChanged(auth, async u => {
             currentUser = u;
             const yes = !!u;
             document.getElementById("authState").textContent = yes ? (u.email || "Authenticated") : "Guest";
@@ -166,11 +178,18 @@ const BeePay = {
                 }
                 this.lazyReadLoaded = new Set();
                 this.resetReadCache();
+                Object.keys(window).filter(k => k.startsWith("__BeePayAdminProfilePromise_")).forEach(k => { delete window[k]; });
                 document.getElementById("authMessage").textContent = "Belum login.";
                 return
             }
             try {
-                const snap = await getDoc(doc(db, "admin_users", u.uid));
+                const profileKey = `__BeePayAdminProfilePromise_${u.uid}`;
+                let profilePromise = window[profileKey];
+                if (!profilePromise) {
+                    profilePromise = getDoc(doc(db, "admin_users", u.uid));
+                    window[profileKey] = profilePromise;
+                }
+                const snap = await profilePromise;
                 if (!snap.exists()) {
                     document.getElementById("authMessage").textContent = "Akun terautentikasi, tetapi belum terdaftar sebagai admin BeePay.";
                     document.getElementById("adminName").textContent = u.email || "User";
