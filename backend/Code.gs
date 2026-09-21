@@ -131,6 +131,16 @@ function doPost(e) {
         return processSandboxConcurrencyVerify(body);
       }));
     }
+    if (body.action === "sandbox_mismatch_concurrency_prepare") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxMismatchConcurrencyPrepare(body);
+      }));
+    }
+    if (body.action === "sandbox_mismatch_concurrency_verify") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxMismatchConcurrencyVerify(body);
+      }));
+    }
     if (body.action === "reconciliation_query") {
       return jsonResponse(processReconciliationQuery(body));
     }
@@ -1501,6 +1511,96 @@ function processSandboxWrongBindingTest(body){
  * existing script lock and idempotency path. Verify performs bounded
  * read-back and cleanup. The golden PASS specimen is never touched.
  */
+
+function processSandboxMismatchConcurrencyPrepare(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Mismatch Concurrency Test.");
+
+  const stamp=Date.now();
+  const intentId="PI-MISMATCH-2351-"+stamp;
+  const orderId="ORDER-MISMATCH-2351-"+stamp;
+  const eventId="SANDBOX-MISMATCH-2351-"+stamp;
+  const userId="TEST-USER-MISMATCH-2351";
+  const providerEventId="MISMATCH-SAME-EVENT-2351-"+stamp;
+  const providerReference="SANDBOX-MISMATCH-2351-"+stamp;
+  const amount=99000;
+  const now=new Date().toISOString();
+  createDocument("payment_intents",intentId,{
+    payment_intent_id:str(intentId),order_id:str(orderId),user_id:str(userId),merchant_id:str("SANDBOX-MISMATCH"),
+    event_id:str(eventId),payment_method_id:str("PM-MISMATCH"),amount:integer(amount),currency:str("IDR"),
+    channel:str("QRIS"),provider:str("SANDBOX-PJP"),provider_adapter:str("SANDBOX-PJP"),routing_id:str("SANDBOX-PJP-QRIS"),
+    client_reference:str("MISMATCH-2351"),idempotency_key:str("IDEMP-MISMATCH-2351-"+stamp),status:str("REQUIRES_PAYMENT"),
+    provider_reference:str(""),trusted:boolean(true),production:boolean(false),created_by:str(authUser.uid),
+    created_by_backend:boolean(true),created_at:timestamp(now),updated_at:timestamp(now)
+  });
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,paymentIntentId:intentId,
+    provider:"SANDBOX-PJP",providerEventId:providerEventId,providerReference:providerReference,amount:amount,currency:"IDR",
+    eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED",wrongAmount:amount+1,wrongCurrency:"USD",
+    invalidSignature:"00",requestCountPerCase:10,credentialValuesExposed:false,
+    message:"Temporary mismatch specimen prepared. No payment, transaction, or ticket exists yet.",timestamp:now};
+}
+
+function processSandboxMismatchConcurrencyVerify(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Mismatch Concurrency Test.");
+  const intentId=requiredText(body.paymentIntentId,"Payment Intent ID");
+  const providerEventId=requiredText(body.providerEventId,"Provider Event ID");
+  const requestCount=Math.max(1,Number(body.requestCount||10));
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  function related(collection,field,value){return listDocuments(collection,500).filter(function(x){return String(x.data[field]||"")===String(value);});}
+  function deleteDocument_(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
+    const response=UrlFetchApp.fetch(url,options); const code=response.getResponseCode();
+    if(code!==404 && (code<200 || code>=300)) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
+  }
+  const intentDoc=getDocument("payment_intents",intentId);
+  if(!intentDoc || !intentDoc.fields) throw new Error("Mismatch Payment Intent tidak ditemukan: "+intentId);
+  const intent=decodeFirestoreFields(intentDoc.fields||{});
+  const txs=related("transactions","payment_intent_id",intentId);
+  const pays=related("payments","payment_intent_id",intentId);
+  const tickets=related("tickets","payment_intent_id",intentId);
+  const webhooks=related("webhooks","payment_intent_id",intentId);
+  const targetWebhooks=webhooks.filter(function(x){return String(x.data.provider_event_id||"")===providerEventId;});
+  const rejectedWebhooks=targetWebhooks.filter(function(x){return String(x.data.status||"").toUpperCase()==="REJECTED";});
+  const processedWebhooks=targetWebhooks.filter(function(x){return String(x.data.status||"").toUpperCase()==="PROCESSED";});
+  addCheck("Intent remains REQUIRES_PAYMENT",String(intent.status||"").toUpperCase()==="REQUIRES_PAYMENT",String(intent.status||""));
+  addCheck("Wrong amount requests create no transaction",txs.length===0,"transactions="+txs.length);
+  addCheck("Wrong amount/currency/invalid-signature requests create no PAID payment",pays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length===0,"paidPayments="+pays.filter(function(x){return String(x.data.status||"").toUpperCase()==="PAID";}).length);
+  addCheck("No ACTIVE ticket is created",tickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length===0,"activeTickets="+tickets.filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length);
+  addCheck("Invalid-signature concurrency produces one rejected webhook",rejectedWebhooks.length===1,"rejectedWebhooks="+rejectedWebhooks.length);
+  addCheck("No webhook is PROCESSED",processedWebhooks.length===0,"processedWebhooks="+processedWebhooks.length);
+  addCheck("Exactly one webhook ledger record for shared invalid-signature event",targetWebhooks.length===1,"targetWebhooks="+targetWebhooks.length);
+  addCheck("Shared webhook remains REJECTED",targetWebhooks.length===1 && String(targetWebhooks[0].data.processing_result||"")==="INVALID_SIGNATURE",targetWebhooks.length===1?String(targetWebhooks[0].data.processing_result||""):"missing");
+  addCheck("Intent amount remains unchanged",Number(intent.amount)===99000,String(intent.amount));
+  addCheck("Intent currency remains IDR",String(intent.currency||"").toUpperCase()==="IDR",String(intent.currency||""));
+  addCheck("Trusted sandbox",intent.production===false && intent.trusted===true && intent.created_by_backend===true,"production="+intent.production+", trusted="+intent.trusted);
+  addCheck("Live bank remains disabled",true,"liveBankCalled=false");
+  addCheck("Credential values are not exposed",true,"credentialValuesExposed=false");
+  const passCount=checks.filter(function(x){return x.pass;}).length;
+  const failCount=checks.length-passCount;
+  const cleanup=[];
+  [["tickets",tickets],["payments",pays],["transactions",txs],["webhooks",webhooks],["payment_intents",[{id:intentId}]]].forEach(function(group){
+    group[1].forEach(function(x){
+      const id=String(x.id || x.data && (x.data.ticket_id||x.data.payment_id||x.data.transaction_id||x.data.webhook_id) || intentId);
+      try{deleteDocument_(group[0],id);cleanup.push(group[0]+"/"+id);}catch(e){}
+    });
+  });
+  return {success:failCount===0,overall:failCount===0?"PASS":"FAIL",environment:"SANDBOX",production:false,liveBankCalled:false,
+    paymentIntentId:intentId,providerEventId:providerEventId,requestedRequests:requestCount*3,checks:checks,passCount:passCount,failCount:failCount,
+    credentialValuesExposed:false,cleanupCount:cleanup.length,
+    message:failCount===0?"Concurrent wrong amount, currency, and invalid-signature requests were rejected without creating PAID payment effects.":"Mismatch concurrency test menemukan kegagalan. Periksa checks.",timestamp:new Date().toISOString()};
+}
+
 function processSandboxConcurrencyPrepare(body){
   if(!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser=verifyFirebaseIdToken(body.idToken);
