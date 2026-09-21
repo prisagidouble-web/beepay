@@ -78,6 +78,15 @@
 <button id="recoveryReplayTestBtn" type="button">Run Recovery &amp; Replay Test</button>
 <div id="recoveryReplayTestMessage" class="message"></div>
 </section>
+<section id="finalRegressionPanel" class="panel" hidden>
+<div class="section-heading"><h2>Final Regression &amp; Production Readiness</h2><p>Pemeriksaan akhir BeePay 23.5.1. Semua pengujian tetap SANDBOX, memakai trusted backend, dan tidak membuat realtime listener Firestore di browser.</p></div>
+<div class="form-grid final-test-actions">
+<button id="endToEndTestBtn" type="button">Run End-to-End Test</button>
+<button id="sandboxAuditFinalBtn" type="button">Run Sandbox Audit</button>
+<button id="idempotencyFinalBtn" type="button">Run Idempotency Test</button>
+</div>
+<div id="finalRegressionTestMessage" class="message final-test-output"></div>
+</section>
 <section id="merchantRegistryPanel" class="panel" hidden>
 <div class="section-heading"><h2>Merchant Registry &amp; API Authentication</h2><p>Mendaftarkan merchant/application secara universal. Credential dibuat dan divalidasi di trusted backend; Firestore hanya menyimpan fingerprint. Raw API secret tidak dikirim ke browser.</p></div>
 <div class="form-grid">
