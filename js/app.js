@@ -5,7 +5,7 @@ import{getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut}from"https:
 const config=window.BeePayConfig;let db=null,auth=null,currentUser=null;
 const BeePay={
 version:"23.5.1",
-async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindReconciliationIntegrity();this.bindMissingReceiptTest();this.bindWrongBindingTest();this.bindConcurrencyTest();this.bindMismatchConcurrencyTest();this.bindRecoveryReplayTest();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
+async init(){document.getElementById("systemStatus").textContent="Online";this.bindAuth();this.bindIntent();this.bindCheckout();this.bindWebhook();this.bindWebhookSimulation();this.bindProviderAdapter();this.bindProviderConfig();this.bindPaymentRouting();this.bindPaymentReconciliation();this.bindMerchantContract();this.bindUniversalPaymentApi();this.bindMerchantRegistry();this.bindPaymentIntentLifecycle();this.bindVerification();this.bindResult();this.bindTicket();this.bindReconciliation();this.bindAudit();this.bindSandbox();this.bindSandboxAudit();this.bindFailureTests();this.bindReconciliationIntegrity();this.bindMissingReceiptTest();this.bindWrongBindingTest();this.bindConcurrencyTest();this.bindMismatchConcurrencyTest();this.bindRecoveryReplayTest();this.bindFinalRegressionTests();this.bindHealth();this.bindFinalAudit();await this.checkAPI();await this.initFirebase()},
 async checkAPI(){const e=document.getElementById("apiStatus");if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){e.textContent="Not Configured";return}try{const r=await fetch(config.API_URL);if(!r.ok)throw Error();e.textContent="Online"}catch(x){e.textContent="Offline"}},
 async initFirebase(){const e=document.getElementById("firebaseStatus");if(!config?.FIREBASE?.projectId||config.FIREBASE.projectId.startsWith("YOUR_")){e.textContent="Not Configured";return}try{initializeApp(config.FIREBASE);db=getFirestore();auth=getAuth();e.textContent="Connected";this.watchAuth()}catch(x){e.textContent="Error";console.error(x)}},
 bindAuth(){
@@ -21,7 +21,7 @@ document.getElementById("logoutButton").hidden=!yes;
 document.getElementById("rolePanel").hidden=!yes;
 document.getElementById("paymentProcessing").hidden=!yes;
 if(document.getElementById("sandboxOrderPanel"))document.getElementById("sandboxOrderPanel").hidden=!yes;
-if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;if(document.getElementById("paymentRoutingPanel"))document.getElementById("paymentRoutingPanel").hidden=!yes;if(document.getElementById("paymentReconciliationPanel"))document.getElementById("paymentReconciliationPanel").hidden=!yes;if(document.getElementById("merchantContractPanel"))document.getElementById("merchantContractPanel").hidden=!yes;if(document.getElementById("universalPaymentApiPanel"))document.getElementById("universalPaymentApiPanel").hidden=!yes;if(document.getElementById("merchantRegistryPanel"))document.getElementById("merchantRegistryPanel").hidden=!yes;if(document.getElementById("paymentIntentLifecyclePanel"))document.getElementById("paymentIntentLifecyclePanel").hidden=!yes;if(document.getElementById("concurrencyTestPanel"))document.getElementById("concurrencyTestPanel").hidden=!yes;if(document.getElementById("recoveryReplayTestPanel"))document.getElementById("recoveryReplayTestPanel").hidden=!yes;
+if(document.getElementById("bindingHardeningPanel"))document.getElementById("bindingHardeningPanel").hidden=!yes;if(document.getElementById("webhookLifecyclePanel"))document.getElementById("webhookLifecyclePanel").hidden=!yes;if(document.getElementById("providerAdapterPanel"))document.getElementById("providerAdapterPanel").hidden=!yes;if(document.getElementById("providerConfigPanel"))document.getElementById("providerConfigPanel").hidden=!yes;if(document.getElementById("paymentRoutingPanel"))document.getElementById("paymentRoutingPanel").hidden=!yes;if(document.getElementById("paymentReconciliationPanel"))document.getElementById("paymentReconciliationPanel").hidden=!yes;if(document.getElementById("merchantContractPanel"))document.getElementById("merchantContractPanel").hidden=!yes;if(document.getElementById("universalPaymentApiPanel"))document.getElementById("universalPaymentApiPanel").hidden=!yes;if(document.getElementById("merchantRegistryPanel"))document.getElementById("merchantRegistryPanel").hidden=!yes;if(document.getElementById("paymentIntentLifecyclePanel"))document.getElementById("paymentIntentLifecyclePanel").hidden=!yes;if(document.getElementById("concurrencyTestPanel"))document.getElementById("concurrencyTestPanel").hidden=!yes;if(document.getElementById("recoveryReplayTestPanel"))document.getElementById("recoveryReplayTestPanel").hidden=!yes;if(document.getElementById("finalRegressionPanel"))document.getElementById("finalRegressionPanel").hidden=!yes;
 if(!yes){
 if(this.lazyReadObserver){
   try{this.lazyReadObserver.disconnect()}catch(_){}
@@ -180,6 +180,56 @@ bindAudit(){document.getElementById("auditForm")?.addEventListener("submit",asyn
 bindSandbox(){document.getElementById("sandboxForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runSandbox()})},bindSandboxAudit(){document.getElementById("sandboxAuditBtn")?.addEventListener("click",async()=>{await this.runSandboxAudit()})},
 bindFailureTests(){document.getElementById("failureTestForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.runFailureTest()})},
 bindReconciliationIntegrity(){document.getElementById("reconIntegrityBtn")?.addEventListener("click",async()=>{await this.runReconciliationIntegrityTest()})},bindMissingReceiptTest(){document.getElementById("missingReceiptTestBtn")?.addEventListener("click",async()=>{await this.runMissingReceiptTest()})},bindWrongBindingTest(){document.getElementById("wrongBindingTestBtn")?.addEventListener("click",async()=>{await this.runWrongBindingTest()})},
+bindFinalRegressionTests(){
+  document.getElementById("endToEndTestBtn")?.addEventListener("click",()=>this.runFinalRegressionTest("endToEnd"));
+  document.getElementById("sandboxAuditFinalBtn")?.addEventListener("click",()=>this.runFinalRegressionTest("audit"));
+  document.getElementById("idempotencyFinalBtn")?.addEventListener("click",()=>this.runFinalRegressionTest("idempotency"));
+},
+async runFinalRegressionTest(kind){
+  const box=document.getElementById("finalRegressionTestMessage");
+  const buttons=["endToEndTestBtn","sandboxAuditFinalBtn","idempotencyFinalBtn"].map(id=>document.getElementById(id)).filter(Boolean);
+  const buttonByKind={endToEnd:"endToEndTestBtn",audit:"sandboxAuditFinalBtn",idempotency:"idempotencyFinalBtn"};
+  const active=document.getElementById(buttonByKind[kind]);
+  if(!box||!active)return;
+  if(this.finalTestBusy){box.textContent="Test lain masih berjalan. Tunggu sampai selesai.";return}
+  if(!auth||!currentUser){box.textContent="Login admin terlebih dahulu.";return}
+  if(!config?.API_URL||config.API_URL.startsWith("YOUR_")){box.textContent="API Apps Script belum dikonfigurasi.";return}
+
+  const labels={endToEnd:"End-to-End Test",audit:"Sandbox Audit",idempotency:"Idempotency Test"};
+  const actions={endToEnd:"sandbox_webhook_lifecycle_test",audit:"sandbox_audit",idempotency:"sandbox_idempotency_test"};
+  this.finalTestBusy=true;
+  buttons.forEach(b=>{b.disabled=true;b.setAttribute("aria-busy","true")});
+  box.textContent=`Menjalankan ${labels[kind]} melalui trusted backend...`;
+
+  let timer=null;
+  try{
+    const idToken=await currentUser.getIdToken();
+    const controller=new AbortController();
+    timer=setTimeout(()=>controller.abort(),45000);
+    const response=await fetch(config.API_URL,{
+      method:"POST",
+      headers:{"Content-Type":"text/plain;charset=utf-8"},
+      body:JSON.stringify({action:actions[kind],idToken}),
+      signal:controller.signal,
+      cache:"no-store"
+    });
+    const result=await response.json();
+    if(!response.ok||!result.success)throw new Error(result.error||result.message||`${labels[kind]} gagal.`);
+    const hasCounts=Number.isFinite(Number(result.passCount)) || Number.isFinite(Number(result.failCount));
+    const pass=hasCounts?Number(result.passCount||0):(result.success===true?1:0);
+    const fail=hasCounts?Number(result.failCount||0):(result.success===true?0:1);
+    const checked=Number(result.checked||0);
+    const detail=result.message||result.summary||"Test selesai.";
+    box.textContent=`${labels[kind]} ${String(result.overall||"PASS").toUpperCase()}: PASS ${pass}${checked?` / ${checked}`:""} · FAIL ${fail}. ${detail}`;
+  }catch(e){
+    console.error(`BeePay ${labels[kind]} error:`,e);
+    box.textContent=`${labels[kind]} FAIL: ${e.name==="AbortError"?"Request timeout setelah 45 detik.":(e.message||e)}`;
+  }finally{
+    if(timer)clearTimeout(timer);
+    buttons.forEach(b=>{b.disabled=false;b.removeAttribute("aria-busy")});
+    this.finalTestBusy=false;
+  }
+},
 bindHealth(){document.getElementById("healthCheckForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.recordHealthCheck()})},
 bindFinalAudit(){document.getElementById("auditChecklistForm")?.addEventListener("submit",async e=>{e.preventDefault();await this.recordFinalAudit()})},
 async recordFinalAudit(){const m=document.getElementById("auditChecklistMessage");if(!db||!currentUser){m.textContent="Login terlebih dahulu.";return}const item=document.getElementById("auditCheckItem").value,status=document.getElementById("auditCheckStatus").value,note=document.getElementById("auditCheckNote").value.trim(),id=`FA-${Date.now()}`;try{await addDoc(collection(db,"final_audits"),{final_audit_id:id,item,status,note,production:false,bank_called:false,approval:false,created_by:currentUser.uid,created_at:serverTimestamp()});document.getElementById("auditChecklistForm").reset();m.textContent=`Final audit ${id} dicatat: ${status}.`;await this.loadFinalAudits()}catch(e){m.textContent="Gagal mencatat final audit: "+e.message}},
