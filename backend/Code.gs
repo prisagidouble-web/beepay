@@ -19,7 +19,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.3.1";
+const BEEPAY_VERSION = "23.3.2";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -1305,6 +1305,25 @@ function processCreateCheckoutSession(body) {
   }
 
   var intent = decodeFirestoreFields(intentDoc.fields || {});
+
+  // Client-controlled amount/currency are non-authoritative. If a client
+  // sends either field, it MUST exactly match the trusted Payment Intent.
+  // Otherwise fail closed instead of silently ignoring tampering.
+  if (body.amount !== undefined && body.amount !== null && String(body.amount).trim() !== "") {
+    var requestedAmount = Number(body.amount);
+    var authoritativeAmount = Number(intent.amount || 0);
+    if (!Number.isSafeInteger(requestedAmount) || requestedAmount !== authoritativeAmount) {
+      throw new Error("Nominal checkout tidak sesuai dengan Payment Intent.");
+    }
+  }
+  if (body.currency !== undefined && body.currency !== null && String(body.currency).trim() !== "") {
+    var requestedCurrency = String(body.currency).trim().toUpperCase();
+    var authoritativeCurrency = String(intent.currency || "IDR").trim().toUpperCase();
+    if (requestedCurrency !== authoritativeCurrency) {
+      throw new Error("Currency checkout tidak sesuai dengan Payment Intent.");
+    }
+  }
+
   if (intent.production !== false || intent.trusted !== true || intent.created_by_backend !== true) {
     throw new Error("Payment Intent bukan intent sandbox trusted backend.");
   }
