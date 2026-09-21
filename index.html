@@ -73,6 +73,11 @@
   <button id="mismatchConcurrencyTestBtn" type="button">Run Mismatch Concurrency Test</button>
   <div id="mismatchConcurrencyTestMessage" class="result-message"></div>
 </section>
+<section id="recoveryReplayTestPanel" class="panel" hidden>
+<div class="section-heading"><h2>Recovery &amp; Replay Test</h2><p>Menguji duplicate callback, late/out-of-order callback, reconciliation replay, missing receipt recovery, dan idempotent terminal state. Semua specimen bersifat SANDBOX dan dibersihkan otomatis.</p></div>
+<button id="recoveryReplayTestBtn" type="button">Run Recovery &amp; Replay Test</button>
+<div id="recoveryReplayTestMessage" class="message"></div>
+</section>
 <section id="merchantRegistryPanel" class="panel" hidden>
 <div class="section-heading"><h2>Merchant Registry &amp; API Authentication</h2><p>Mendaftarkan merchant/application secara universal. Credential dibuat dan divalidasi di trusted backend; Firestore hanya menyimpan fingerprint. Raw API secret tidak dikirim ke browser.</p></div>
 <div class="form-grid">
