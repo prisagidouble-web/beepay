@@ -11,6 +11,7 @@
  * Phase 23.2.0 adds universal merchant payment API contract.
  * Phase 23.1.0 adds merchant registry and API authentication boundary.
  * Phase 23.1.1 fixes sandbox merchant registry Firestore array encoding.
+ * Phase 23.5.1 adds Recovery & Replay final sandbox verification.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -139,6 +140,11 @@ function doPost(e) {
     if (body.action === "sandbox_mismatch_concurrency_verify") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxMismatchConcurrencyVerify(body);
+      }));
+    }
+    if (body.action === "sandbox_recovery_replay_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxRecoveryReplayTest(body);
       }));
     }
     if (body.action === "reconciliation_query") {
@@ -1711,6 +1717,117 @@ function processSandboxConcurrencyVerify(body){
       : "Concurrency Test FAIL: periksa checks; temporary specimen sudah dibersihkan.",
     timestamp:new Date().toISOString()
   };
+}
+
+
+function processSandboxRecoveryReplayTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Recovery & Replay Test.");
+
+  const stamp=Date.now();
+  const intentId="PI-RR-2351-"+stamp;
+  const orderId="ORDER-RR-2351-"+stamp;
+  const eventId="SANDBOX-RECOVERY-REPLAY-2351-"+stamp;
+  const userId="TEST-USER-RR-2351-"+stamp;
+  const amount=123000;
+  const provider="SANDBOX-PJP";
+  const providerReference="SANDBOX-RR-2351-"+stamp;
+  const providerEventProcessing="RR-PROCESSING-2351-"+stamp;
+  const providerEventSuccess="RR-SUCCESS-2351-"+stamp;
+  const providerEventLate="RR-LATE-2351-"+stamp;
+  const now=new Date().toISOString();
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  function deleteDocument_(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
+    const response=UrlFetchApp.fetch(url,options);
+    const code=response.getResponseCode();
+    if(code<200 || code>=300) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
+  }
+  function related_(collection){
+    return listDocuments(collection,500).filter(function(x){
+      const d=x.data||{};
+      return String(d.payment_intent_id||"")===intentId || String(d.order_id||"")===orderId;
+    });
+  }
+  function cleanup_(){
+    ["payment_receipts","tickets","payments","transactions","webhooks","audit_logs","payment_intents"].forEach(function(collection){
+      related_(collection).forEach(function(x){
+        try{ deleteDocument_(collection,String(x.id)); }catch(e){}
+      });
+    });
+  }
+
+  try {
+    createDocument("payment_intents",intentId,{
+      payment_intent_id:str(intentId),order_id:str(orderId),user_id:str(userId),merchant_id:str("SANDBOX-RECOVERY-REPLAY"),
+      event_id:str(eventId),payment_method_id:str("PM-RR-2351"),amount:integer(amount),currency:str("IDR"),channel:str("QRIS"),
+      provider:str(provider),provider_adapter:str(provider),routing_id:str("SANDBOX-PJP-QRIS"),client_reference:str("RECOVERY-REPLAY-2351"),
+      idempotency_key:str("IDEMP-RR-2351-"+stamp),status:str("REQUIRES_PAYMENT"),trusted:boolean(true),production:boolean(false),
+      created_by:str(authUser.uid),created_by_backend:boolean(true),created_at:timestamp(now),updated_at:timestamp(now)
+    });
+    addCheck("Temporary intent created as REQUIRES_PAYMENT",true,intentId);
+
+    const base={idToken:body.idToken,paymentIntentId:intentId,provider:provider,providerReference:providerReference,currency:"IDR",amount:amount,targetStatus:"PROCESSING",signatureValid:true,payloadHash:"RR-HASH-2351"};
+    const processing=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventProcessing,eventType:"PAYMENT_PROCESSING"}));
+    addCheck("PROCESSING webhook accepted",processing.success===true && processing.existing!==true,processing.message||"");
+
+    const success=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED"}));
+    addCheck("First SUCCEEDED webhook accepted",success.success===true && success.existing!==true,success.message||"");
+
+    const duplicate=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED"}));
+    addCheck("Duplicate SUCCEEDED webhook is idempotent",duplicate.success===true && duplicate.existing===true && duplicate.idempotent===true,duplicate.message||"");
+
+    const late=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventLate,eventType:"PAYMENT_PROCESSING",targetStatus:"PROCESSING",providerReference:providerReference+"-LATE"}));
+    addCheck("Late/out-of-order PROCESSING webhook is rejected",late.rejected===true && late.reason==="OUT_OF_ORDER_TERMINAL_STATE",late.reason||"");
+
+    const statusAfterReplay=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
+    addCheck("Replay leaves reconciliation consistent",statusAfterReplay.reconciled===true,statusAfterReplay.integrity||"");
+    addCheck("Exactly one PAID transaction after replay",statusAfterReplay.transactionCount===1,String(statusAfterReplay.transactionCount));
+    addCheck("Exactly one PAID payment after replay",statusAfterReplay.paymentCount===1,String(statusAfterReplay.paymentCount));
+    addCheck("Exactly one ACTIVE ticket after replay",related_("tickets").filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length===1,String(related_("tickets").filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length));
+
+    const receipt1=ensureSandboxReceiptForIntent_(intentId);
+    addCheck("Receipt recovery preparation succeeds",!!receipt1.receiptId,receipt1.receiptId||"");
+    const receiptId="RCP-"+intentId;
+    deleteDocument_("payment_receipts",receiptId);
+    const missingStatus=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
+    addCheck("Reconciliation detects missing receipt",missingStatus.reconciled===false && missingStatus.receiptCount===0,missingStatus.integrity||"");
+    const recovered=ensureSandboxReceiptForIntent_(intentId);
+    addCheck("Missing receipt is recoverable",!!recovered.receiptId && recovered.existing===false,recovered.receiptId||"");
+    const recoveredAgain=ensureSandboxReceiptForIntent_(intentId);
+    addCheck("Receipt recovery is idempotent",!!recoveredAgain.existing,recoveredAgain.receiptId||"");
+
+    const finalStatus=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentId});
+    addCheck("Final reconciliation returns consistent",finalStatus.reconciled===true,finalStatus.integrity||"");
+    addCheck("Final exactly one receipt",finalStatus.receiptCount===1,String(finalStatus.receiptCount));
+    addCheck("Final exactly one PAID transaction",finalStatus.transactionCount===1,String(finalStatus.transactionCount));
+    addCheck("Final exactly one PAID payment",finalStatus.paymentCount===1,String(finalStatus.paymentCount));
+    addCheck("Final ACTIVE ticket count is one",related_("tickets").filter(function(x){return String(x.data.status||"").toUpperCase()==="ACTIVE";}).length===1,"activeTickets=1");
+    addCheck("Live bank remains disabled",finalStatus.liveBankCalled===false,"liveBankCalled=false");
+    addCheck("Credential values are not exposed",finalStatus.credentialValuesExposed===false,"credentialValuesExposed=false");
+    addCheck("Backend remains SANDBOX",finalStatus.environment==="SANDBOX" && finalStatus.production===false,"SANDBOX");
+
+    const passCount=checks.filter(function(x){return x.pass;}).length;
+    const failCount=checks.length-passCount;
+    return {
+      success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,
+      test:"RECOVERY_REPLAY_23_5_1",paymentIntentId:intentId,providerEventId:providerEventSuccess,
+      passCount:passCount,failCount:failCount,checked:checks.length,overall:failCount===0?"PASS":"FAIL",checks:checks,
+      reconciliation:finalStatus,credentialValuesExposed:false,
+      message:failCount===0
+        ? "Recovery & Replay Test PASS: duplicate/late webhook tetap aman, receipt dapat dipulihkan, dan state terminal tetap idempotent."
+        : "Recovery & Replay Test FAIL: periksa checks.",
+      timestamp:new Date().toISOString()
+    };
+  } finally {
+    cleanup_();
+  }
 }
 
 function processSandboxReconciliationIntegrityTest(body){
