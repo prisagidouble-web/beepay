@@ -19,7 +19,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.4.2";
+const BEEPAY_VERSION = "23.4.3";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -105,6 +105,9 @@ function doPost(e) {
     }
     if (body.action === "payment_reconciliation_status") {
       return jsonResponse(processPaymentReconciliationStatus(body));
+    }
+    if (body.action === "reconciliation_query") {
+      return jsonResponse(processReconciliationQuery(body));
     }
     if (body.action === "sandbox_payment_reconciliation_test") {
       return jsonResponse(withScriptLock(function() {
@@ -1032,6 +1035,123 @@ function ensureSandboxReceiptForIntent_(intentId) {
     production:boolean(false), source:str("SANDBOX")
   });
   return {receiptId:receiptId,existing:false,receipt:receipt,transactionId:String(tx.transaction_id||""),paymentId:String(pay.payment_id||"")};
+}
+
+/**
+ * Trusted read-only reconciliation endpoint.
+ *
+ * The browser no longer queries the transactions collection directly.
+ * This avoids exposing a broad operational ledger query to the client,
+ * removes the dependency on client-side Firestore Rules/index behavior for
+ * the admin reconciliation screen, and keeps the read bounded.
+ *
+ * Filtering strategy:
+ * - no filter: ordered latest transactions
+ * - event/status filter: one equality filter is sent to Firestore
+ *   (single-field indexed), then the second filter is applied in trusted code.
+ */
+function processReconciliationQuery(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+
+  const role=String(admin.role||"").toUpperCase();
+  const allowedRoles=["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"];
+  if(allowedRoles.indexOf(role)===-1) throw new Error("Role tidak memiliki akses Reconciliation.");
+
+  const eventFilter=String(body.eventId||"").trim();
+  const statusFilter=String(body.status||"").trim().toUpperCase();
+  const allowedStatuses=["","PAID","PENDING","FAILED"];
+  if(allowedStatuses.indexOf(statusFilter)===-1) throw new Error("Status Reconciliation tidak valid.");
+
+  let requestedLimit=Number(body.limit||20);
+  if(!Number.isSafeInteger(requestedLimit)) requestedLimit=20;
+  requestedLimit=Math.max(1,Math.min(requestedLimit,50));
+
+  const result=runFirestoreQuery_(eventFilter,statusFilter,Math.max(50,requestedLimit));
+  let rows=(result.documents||[]).map(function(doc){
+    return decodeFirestoreFields(doc.fields||{});
+  });
+
+  // Stable newest-first sorting happens inside trusted backend.
+  rows.sort(function(a,b){
+    return String(b.created_at||"").localeCompare(String(a.created_at||""));
+  });
+
+  if(eventFilter){
+    rows=rows.filter(function(x){return String(x.event_id||"")===eventFilter;});
+  }
+  if(statusFilter){
+    rows=rows.filter(function(x){return String(x.status||"").toUpperCase()===statusFilter;});
+  }
+
+  rows=rows.slice(0,requestedLimit);
+
+  let total=0,paid=0,pending=0,failed=0;
+  rows.forEach(function(x){
+    const amount=Number(x.amount||0);
+    total+=amount;
+    const s=String(x.status||"").toUpperCase();
+    if(s==="PAID") paid+=amount;
+    else if(s==="PENDING") pending+=amount;
+    else if(s==="FAILED") failed+=amount;
+  });
+
+  return {
+    success:true,
+    environment:"SANDBOX",
+    production:false,
+    liveBankCalled:false,
+    source:"TRUSTED_BACKEND",
+    role:role,
+    eventId:eventFilter,
+    status:statusFilter,
+    limit:requestedLimit,
+    returned:rows.length,
+    summary:{
+      count:rows.length,
+      total:total,
+      paid:paid,
+      pending:pending,
+      failed:failed
+    },
+    rows:rows,
+    timestamp:new Date().toISOString()
+  };
+}
+
+function runFirestoreQuery_(eventFilter,statusFilter,pageSize){
+  const url=DB_ROOT.replace(/\/documents$/,"/documents:runQuery");
+  const structured={
+    from:[{collectionId:"transactions"}],
+    limit:Math.max(1,Math.min(Number(pageSize)||50,100))
+  };
+
+  // Use at most one server-side equality filter to avoid a composite-index
+  // dependency. A second filter is applied after trusted retrieval.
+  const filterField=eventFilter ? "event_id" : (statusFilter ? "status" : "");
+  const filterValue=eventFilter || statusFilter;
+  if(filterField){
+    structured.where={
+      fieldFilter:{
+        field:{fieldPath:filterField},
+        op:"EQUAL",
+        value:{stringValue:String(filterValue)}
+      }
+    };
+  }else{
+    structured.orderBy=[{
+      field:{fieldPath:"created_at"},
+      direction:"DESCENDING"
+    }];
+  }
+
+  const raw=firestoreRequest(url,"post",{structuredQuery:structured});
+  const arr=Array.isArray(raw)?raw:[];
+  return {
+    documents:arr.filter(function(item){return item && item.document;}).map(function(item){return item.document;})
+  };
 }
 
 function processPaymentReconciliationStatus(body){
