@@ -1780,7 +1780,7 @@ function processSandboxRecoveryReplayTest(body){
     const success=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED"}));
     addCheck("First SUCCEEDED webhook accepted",success.success===true && success.existing!==true,success.message||"");
 
-    const duplicate=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED"}));
+    const duplicate=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventSuccess,eventType:"PAYMENT_SUCCEEDED",targetStatus:"SUCCEEDED"}));
     addCheck("Duplicate SUCCEEDED webhook is idempotent",duplicate.success===true && duplicate.existing===true && duplicate.idempotent===true,duplicate.message||"");
 
     const late=processSandboxWebhook(Object.assign({},base,{providerEventId:providerEventLate,eventType:"PAYMENT_PROCESSING",targetStatus:"PROCESSING",providerReference:providerReference+"-LATE"}));
