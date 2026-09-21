@@ -2288,10 +2288,20 @@ function processSandboxMerchantRegistryTest(body){
  * the trusted backend registry. Raw secrets never leave Script Properties.
  */
 function findMerchantRegistryById_(merchantId) {
-  var docs=listDocuments("merchants",500);
+  // High-traffic hardening: merchant IDs are normally the Firestore document IDs.
+  // Prefer a single-document lookup; only fall back to a bounded field query for
+  // legacy records whose document ID differs from merchant_id. Never scan 500 docs.
+  var id=String(merchantId||"").trim();
+  if(!id) return null;
+  var direct=getDocument("merchants",id);
+  if(direct && direct.fields){
+    var directData=decodeFirestoreFields(direct.fields||{});
+    if(String(directData.merchant_id||direct.name.split("/").pop())===id) return directData;
+  }
+  var docs=queryCollectionByField_("merchants","merchant_id",id,10);
   for(var i=0;i<docs.length;i++){
     var d=docs[i].data||{};
-    if(String(d.merchant_id||docs[i].id)===String(merchantId)) return d;
+    if(String(d.merchant_id||docs[i].id)===id) return d;
   }
   return null;
 }
@@ -2319,9 +2329,13 @@ function validateUniversalPaymentRequest_(body){
     channel:channel,paymentPurpose:purpose,idempotencyKey:idempotencyKey,route:route};
 }
 function createUniversalPaymentIntent_(order,req,createdBy){
-  var existing=listDocuments("payment_intents",200).find(function(item){
-    return String(item.data.idempotency_key||"")===req.idempotencyKey;
-  });
+  // High-traffic hardening: idempotency lookup is targeted by the indexed
+  // idempotency_key instead of downloading up to 200 Payment Intents.
+  // A bounded result also protects the backend if a malformed/legacy dataset
+  // contains duplicate keys. The existing parameter-mismatch checks remain
+  // authoritative below.
+  var existingDocs=queryCollectionByField_("payment_intents","idempotency_key",req.idempotencyKey,10);
+  var existing=existingDocs.length?existingDocs[0]:null;
   if(existing){
     var ed=existing.data;
     if(String(ed.order_id||"")!==req.orderId||String(ed.merchant_id||"")!==req.merchantId||
