@@ -116,6 +116,11 @@ function doPost(e) {
         return processSandboxMissingReceiptTest(body);
       }));
     }
+    if (body.action === "sandbox_wrong_binding_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxWrongBindingTest(body);
+      }));
+    }
     if (body.action === "reconciliation_query") {
       return jsonResponse(processReconciliationQuery(body));
     }
@@ -1360,6 +1365,117 @@ function processSandboxMissingReceiptTest(body){
     };
   } finally {
     // Best-effort cleanup so this negative test leaves no operational records.
+    for(let i=created.length-1;i>=0;i--){
+      try{deleteDocument_(created[i][0],created[i][1]);}catch(e){Logger.log("Cleanup failed: "+created[i][0]+"/"+created[i][1]+" "+e.message);}
+    }
+  }
+}
+
+/**
+ * Phase 23.5.1 PATCH3 — controlled negative test for cross-record binding.
+ * Creates two temporary trusted SANDBOX intents with their own transaction/payment
+ * pairs, then deliberately creates Receipt A under Intent A but points it to
+ * Transaction B and Payment B. Reconciliation must reject the state.
+ * No golden specimen is touched and all temporary documents are cleaned up.
+ */
+function processSandboxWrongBindingTest(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Reconciliation.");
+
+  const stamp=Date.now();
+  const intentA="PI-WB-2351-A-"+stamp;
+  const intentB="PI-WB-2351-B-"+stamp;
+  const txA="SBX-WB-TX-A-"+stamp;
+  const txB="SBX-WB-TX-B-"+stamp;
+  const payA="SBX-WB-PAY-A-"+stamp;
+  const payB="SBX-WB-PAY-B-"+stamp;
+  const orderA="ORDER-WB-A-"+stamp;
+  const orderB="ORDER-WB-B-"+stamp;
+  const eventA="SANDBOX-WRONG-BINDING-A-2351";
+  const eventB="SANDBOX-WRONG-BINDING-B-2351";
+  const userA="TEST-USER-WB-A-2351";
+  const userB="TEST-USER-WB-B-2351";
+  const amount=177000;
+  const providerRefA="SANDBOX-WB-A-"+stamp;
+  const providerRefB="SANDBOX-WB-B-"+stamp;
+  const now=new Date().toISOString();
+  const created=[];
+  const checks=[];
+  function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
+  function deleteDocument_(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
+    const response=UrlFetchApp.fetch(url,options);
+    const code=response.getResponseCode();
+    if(code<200 || code>=300) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
+  }
+  function createSpecimen_(intentId,txId,payId,orderId,eventId,userId,providerReference){
+    createDocument("payment_intents",intentId,{
+      payment_intent_id:str(intentId),order_id:str(orderId),user_id:str(userId),merchant_id:str("SANDBOX-WRONG-BINDING"),
+      event_id:str(eventId),payment_method_id:str("PM-WRONG-BINDING"),amount:integer(amount),currency:str("IDR"),
+      channel:str("QRIS"),provider:str("SANDBOX-PJP"),provider_adapter:str("SANDBOX-PJP"),routing_id:str("SANDBOX-PJP-QRIS"),
+      client_reference:str("WRONG-BINDING-2351"),idempotency_key:str("IDEMP-WRONG-BINDING-2351-"+intentId),
+      status:str("SUCCEEDED"),provider_reference:str(providerReference),trusted:boolean(true),production:boolean(false),
+      created_by:str(authUser.uid),created_by_backend:boolean(true),created_at:timestamp(now),updated_at:timestamp(now)
+    });
+    created.push(["payment_intents",intentId]);
+    createDocument("transactions",txId,{
+      transaction_id:str(txId),order_id:str(orderId),payment_intent_id:str(intentId),event_id:str(eventId),user_id:str(userId),
+      amount:integer(amount),currency:str("IDR"),status:str("PAID"),channel:str("QRIS"),provider_reference:str(providerReference),
+      trusted:boolean(true),production:boolean(false),created_at:timestamp(now),updated_at:timestamp(now),paid_at:timestamp(now)
+    });
+    created.push(["transactions",txId]);
+    createDocument("payments",payId,{
+      payment_id:str(payId),transaction_id:str(txId),payment_intent_id:str(intentId),order_id:str(orderId),event_id:str(eventId),
+      user_id:str(userId),amount:integer(amount),currency:str("IDR"),status:str("PAID"),provider:str("SANDBOX-PJP"),
+      provider_reference:str(providerReference),channel:str("QRIS"),trusted:boolean(true),production:boolean(false),
+      created_at:timestamp(now),updated_at:timestamp(now),paid_at:timestamp(now)
+    });
+    created.push(["payments",payId]);
+  }
+
+  try {
+    createSpecimen_(intentA,txA,payA,orderA,eventA,userA,providerRefA);
+    createSpecimen_(intentB,txB,payB,orderB,eventB,userB,providerRefB);
+
+    const receiptId="RCP-"+intentA;
+    createDocument("payment_receipts",receiptId,{
+      receipt_id:str(receiptId),payment_id:str(payB),transaction_id:str(txB),payment_intent_id:str(intentA),
+      order_id:str(orderA),event_id:str(eventA),user_id:str(userA),amount:integer(amount),currency:str("IDR"),status:str("PAID"),
+      provider:str("SANDBOX-PJP"),provider_reference:str(providerRefB),channel:str("QRIS"),issued_at:timestamp(now),
+      created_at:timestamp(now),updated_at:timestamp(now),production:boolean(false),source:str("SANDBOX")
+    });
+    created.push(["payment_receipts",receiptId]);
+
+    const status=processPaymentReconciliationStatus({idToken:body.idToken,paymentIntentId:intentA});
+    addCheck("Temporary sandbox intent A is SUCCEEDED",status.status==="SUCCEEDED",status.status);
+    addCheck("Exactly one PAID transaction for intent A",status.transactionCount===1,String(status.transactionCount));
+    addCheck("Exactly one PAID payment for intent A",status.paymentCount===1,String(status.paymentCount));
+    addCheck("Exactly one receipt for intent A",status.receiptCount===1,String(status.receiptCount));
+    addCheck("Receipt intent binding remains correct",(status.integrityCodes||[]).indexOf("RECEIPT_INTENT_BINDING")===-1,"intent binding should pass");
+    addCheck("Reconciliation is rejected",status.reconciled===false,"reconciled="+status.reconciled);
+    addCheck("Integrity is INCONSISTENT",status.integrity==="INCONSISTENT",status.integrity);
+    addCheck("Receipt→Transaction mismatch detected",(status.integrityCodes||[]).indexOf("RECEIPT_TRANSACTION_BINDING")!==-1,JSON.stringify(status.integrityCodes||[]));
+    addCheck("Receipt→Payment mismatch detected",(status.integrityCodes||[]).indexOf("RECEIPT_PAYMENT_BINDING")!==-1,JSON.stringify(status.integrityCodes||[]));
+    addCheck("Live bank remains disabled",status.liveBankCalled===false,"liveBankCalled=false");
+    addCheck("Credential values are not exposed",status.credentialValuesExposed===false,"credentialValuesExposed=false");
+
+    const passCount=checks.filter(function(x){return x.pass;}).length;
+    const failCount=checks.length-passCount;
+    return {
+      success:failCount===0,environment:"SANDBOX",production:false,liveBankCalled:false,
+      test:"WRONG_BINDING_RECONCILIATION_23_5_1",overall:failCount===0?"PASS":"FAIL",
+      passCount:passCount,failCount:failCount,checked:checks.length,paymentIntentId:intentA,
+      wrongTransactionId:txB,wrongPaymentId:payB,receiptId:receiptId,checks:checks,
+      message:failCount===0
+        ?"Wrong Binding Test PASS: reconciliation menolak receipt yang terikat ke transaction/payment yang salah."
+        :"Wrong Binding Test FAIL: periksa checks dan integrityCodes.",timestamp:new Date().toISOString()
+    };
+  } finally {
     for(let i=created.length-1;i>=0;i--){
       try{deleteDocument_(created[i][0],created[i][1]);}catch(e){Logger.log("Cleanup failed: "+created[i][0]+"/"+created[i][1]+" "+e.message);}
     }
