@@ -62,6 +62,11 @@
 </div>
 <div id="paymentIntentLifecycleMessage" class="message"></div>
 </section>
+<section id="concurrencyTestPanel" class="panel" hidden>
+<div class="section-heading"><h2>High Traffic &amp; Concurrency Test</h2><p>Menguji duplicate webhook dan reconciliation secara bersamaan pada satu Payment Intent SANDBOX. Test membuat specimen sementara dan membersihkannya otomatis.</p></div>
+<button id="concurrencyTestBtn" type="button">Run Concurrency Test</button>
+<div id="concurrencyTestMessage" class="message"></div>
+</section>
 <section id="merchantRegistryPanel" class="panel" hidden>
 <div class="section-heading"><h2>Merchant Registry &amp; API Authentication</h2><p>Mendaftarkan merchant/application secara universal. Credential dibuat dan divalidasi di trusted backend; Firestore hanya menyimpan fingerprint. Raw API secret tidak dikirim ke browser.</p></div>
 <div class="form-grid">
