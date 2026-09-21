@@ -67,6 +67,12 @@
 <button id="concurrencyTestBtn" type="button">Run Concurrency Test</button>
 <div id="concurrencyTestMessage" class="message"></div>
 </section>
+<section id="mismatchConcurrencyTestPanel" class="panel">
+  <h2>Amount, Currency &amp; Signature Mismatch — Concurrency Test</h2>
+  <p>Menguji request paralel dengan nominal salah, currency salah, dan signature invalid. Test membuat specimen SANDBOX sementara dan membersihkannya otomatis. Tidak boleh menghasilkan PAID transaction/payment/ticket.</p>
+  <button id="mismatchConcurrencyTestBtn" type="button">Run Mismatch Concurrency Test</button>
+  <div id="mismatchConcurrencyTestMessage" class="result-message"></div>
+</section>
 <section id="merchantRegistryPanel" class="panel" hidden>
 <div class="section-heading"><h2>Merchant Registry &amp; API Authentication</h2><p>Mendaftarkan merchant/application secara universal. Credential dibuat dan divalidasi di trusted backend; Firestore hanya menyimpan fingerprint. Raw API secret tidak dikirim ke browser.</p></div>
 <div class="form-grid">
