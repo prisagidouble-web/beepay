@@ -84,6 +84,15 @@
 <button id="recoveryReplayTestBtn" type="button">Run Recovery &amp; Replay Test</button>
 <div id="recoveryReplayTestMessage" class="message"></div>
 </section>
+<section id="rateLimitPanel" class="panel">
+<div class="section-heading"><h2>Rate Limit &amp; Abuse Protection</h2><p>Menguji burst protection di trusted backend menggunakan CacheService. Test tidak membuat payment, transaction, ticket, atau Firestore listener.</p></div>
+<div class="form-grid">
+<input value="SANDBOX · SERVER-SIDE" readonly placeholder="Environment">
+<input value="10 requests / 60s per identity" readonly placeholder="Policy">
+<button id="rateLimitTestBtn" type="button">Run Rate Limit Test</button>
+</div>
+<div id="rateLimitTestMessage" class="message"></div>
+</section>
 <section id="finalRegressionPanel" class="panel" hidden>
 <div class="section-heading"><h2>Final Regression &amp; Production Readiness</h2><p>Pemeriksaan akhir BeePay 23.5.7. Semua pengujian tetap SANDBOX, memakai trusted backend, dan tidak membuat realtime listener Firestore di browser.</p></div>
 <div class="form-grid final-test-actions">
