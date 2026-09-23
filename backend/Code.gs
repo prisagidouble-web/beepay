@@ -22,7 +22,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.11";
+const BEEPAY_VERSION = "23.5.12";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -223,6 +223,11 @@ function doPost(e) {
     if (body.action === "create_audit_event") {
       return jsonResponse(withScriptLock(function() {
         return processCreateAuditEvent(body);
+      }));
+    }
+    if (body.action === "create_ticket_record") {
+      return jsonResponse(withScriptLock(function() {
+        return processCreateTicketRecord(body);
       }));
     }
     return jsonResponse({
@@ -4114,6 +4119,70 @@ function processCreateAuditEvent(body) {
     production: false,
     liveBankCalled: false,
     message: "Audit event dicatat oleh trusted backend."
+  };
+}
+
+/**
+ * Trusted Ticket Issuance Ledger writer.
+ * Browser never writes tickets directly. This endpoint only creates a
+ * non-active QA ledger record and can never issue an ACTIVE ticket.
+ */
+function processCreateTicketRecord(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun admin tidak aktif atau tidak ditemukan.");
+  if (BEEPAY_ROLES.indexOf(String(admin.role || "").toUpperCase()) === -1) {
+    throw new Error("Role admin tidak dikenali.");
+  }
+
+  const orderId = String(body.orderId || "").trim();
+  const transactionId = String(body.transactionId || "").trim();
+  const userId = String(body.userId || "").trim();
+  const eventId = String(body.eventId || "").trim();
+  const requestedStatus = String(body.status || "PENDING_ACTIVATION").trim().toUpperCase();
+
+  if (!orderId || orderId.length > 200) throw new Error("Order ID wajib diisi dan maksimal 200 karakter.");
+  if (!transactionId || transactionId.length > 200) throw new Error("Transaction ID wajib diisi dan maksimal 200 karakter.");
+  if (!userId || userId.length > 200) throw new Error("User ID wajib diisi dan maksimal 200 karakter.");
+  if (!eventId || eventId.length > 200) throw new Error("Event ID wajib diisi dan maksimal 200 karakter.");
+  if (["PENDING_ACTIVATION", "HOLD"].indexOf(requestedStatus) === -1) {
+    throw new Error("Ticket ledger hanya mengizinkan PENDING_ACTIVATION atau HOLD.");
+  }
+
+  const now = new Date().toISOString();
+  const ticketId = "TKT-LDG-" + new Date().getTime() + "-" + Utilities.getUuid().slice(0,8);
+  createDocument("tickets", ticketId, {
+    ticket_id: str(ticketId),
+    order_id: str(orderId),
+    transaction_id: str(transactionId),
+    user_id: str(userId),
+    event_id: str(eventId),
+    status: str(requestedStatus),
+    active: boolean(false),
+    activated_by_backend: boolean(false),
+    created_by: str(authUser.uid),
+    created_by_backend: boolean(true),
+    trusted: boolean(true),
+    production: boolean(false),
+    bank_called: boolean(false),
+    source: str("trusted-backend-ticket-ledger"),
+    created_at: timestamp(now),
+    updated_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    ticketId: ticketId,
+    status: requestedStatus,
+    active: false,
+    activatedByBackend: false,
+    trusted: true,
+    production: false,
+    liveBankCalled: false,
+    actorUid: authUser.uid,
+    role: String(admin.role || ""),
+    message: "Ticket ledger dicatat oleh trusted backend. Ticket belum aktif."
   };
 }
 
