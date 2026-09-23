@@ -21,7 +21,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.2";
+const BEEPAY_VERSION = "23.5.3";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -213,7 +213,23 @@ function doPost(e) {
  */
 function withScriptLock(fn) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
+
+  // HIGH-TRAFFIC HARDENING (23.5.3):
+  // Do not allow requests to queue behind the global Apps Script lock for
+  // 15 seconds. Under burst traffic that turns contention into long request
+  // latency and amplifies retries. Fail closed and let the caller retry.
+  const LOCK_TIMEOUT_MS = 5000;
+
+  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+    return {
+      success: false,
+      error_code: "SYSTEM_BUSY",
+      retryable: true,
+      retry_after_ms: 1500,
+      message: "BeePay sedang menangani banyak transaksi. Silakan coba lagi."
+    };
+  }
+
   try {
     return fn();
   } finally {

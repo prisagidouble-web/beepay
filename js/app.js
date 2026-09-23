@@ -8,7 +8,7 @@ let db = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
 const BeePay = {
-    version: "23.5.2",
+    version: "23.5.3",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -219,7 +219,7 @@ const BeePay = {
         )
     },
     setupLazyAdminReads() {
-        // HIGH-TRAFFIC SAFE MODE (23.5.2): do not start Firestore list reads
+        // HIGH-TRAFFIC SAFE MODE (23.5.3): do not start Firestore list reads
         // merely because an admin logged in or a list entered the viewport.
         // The previous IntersectionObserver could turn a long admin page into
         // multiple Firestore reads immediately after login. Under real traffic
