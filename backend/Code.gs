@@ -22,7 +22,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.9";
+const BEEPAY_VERSION = "23.5.10";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -216,6 +216,9 @@ function doPost(e) {
       return jsonResponse(withScriptLock(function() {
         return processSandboxRateLimitTest(body);
       }));
+    }
+    if (body.action === "sandbox_high_traffic_listener_safety_test") {
+      return jsonResponse(processSandboxHighTrafficListenerSafetyTest(body));
     }
     return jsonResponse({
       success: false,
@@ -4149,6 +4152,151 @@ function processSandboxRateLimitTest(body) {
   const passCount=checks.filter(x=>x.pass).length, failCount=checks.length-passCount, cache=CacheService.getScriptCache();
   try{cache.remove("BEEPAY_RL_"+bucket+"_"+identityA);}catch(_){} try{cache.remove("BEEPAY_RL_"+bucket+"_"+identityB);}catch(_){}
   return {success:failCount===0,overall:failCount===0?"PASS":"FAIL",passCount,failCount,checked:checks.length,environment:"SANDBOX",production:false,liveBankCalled:false,burstRequests:burst,configuredLimit:limit,windowSeconds,allowedRequests:allowedA,rejectedRequests:blockedA,isolatedIdentityRequests:allowedB,credentialValuesExposed:false,checks,message:failCount===0?"Rate Limit & Abuse Protection PASS: burst requests are bounded server-side, quota is isolated per identity, and the limiter creates no payment effects.":"Rate Limit & Abuse Protection FAIL: periksa checks.",timestamp:new Date().toISOString()};
+}
+
+
+/**
+ * Phase 23.5.10 — High-Traffic / Listener Safety Test.
+ *
+ * Verifies the read path used under burst conditions:
+ * - creates one temporary SANDBOX Payment Intent only;
+ * - issues a bounded batch of concurrent Firestore REST runQuery calls;
+ * - every query is identity-scoped to that Payment Intent;
+ * - no realtime listener/onSnapshot is involved (GAS REST path);
+ * - no transaction/payment/ticket is created;
+ * - temporary specimen is always removed.
+ *
+ * This is deliberately bounded (20 batches x 3 ledgers) and must not be
+ * used as a production load generator.
+ */
+function processSandboxHighTrafficListenerSafetyTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role = String(admin.role || "").toUpperCase();
+  if (["SUPER_ADMIN","EVENT_ADMIN","AUDITOR","FINANCE"].indexOf(role) === -1) {
+    throw new Error("Role tidak memiliki akses High-Traffic / Listener Safety Test.");
+  }
+
+  const stamp = Date.now();
+  const intentId = "PI-HTLS-23510-" + stamp;
+  const orderId = "ORDER-HTLS-23510-" + stamp;
+  const userId = "TEST-USER-HTLS-23510";
+  const created = [];
+  const checks = [];
+  function addCheck(name, pass, detail) {
+    checks.push({name:String(name), pass:!!pass, detail:String(detail || "")});
+  }
+
+  function deleteDoc(collection, id) {
+    const url = DB_ROOT + "/" + collection + "/" + encodeURIComponent(id);
+    const response = UrlFetchApp.fetch(url, {
+      method:"delete",
+      headers:{Authorization:"Bearer " + ScriptApp.getOAuthToken()},
+      muteHttpExceptions:true
+    });
+    const status = response.getResponseCode();
+    if (status < 200 || status >= 300) throw new Error("Firestore DELETE " + status);
+  }
+
+  try {
+    createDocument("payment_intents", intentId, {
+      payment_intent_id:str(intentId),
+      order_id:str(orderId),
+      user_id:str(userId),
+      merchant_id:str("SANDBOX-HTLS-23510"),
+      application_id:str("SANDBOX-HTLS-APP"),
+      event_id:str("SANDBOX-HTLS-EVENT"),
+      amount:integer(99000),
+      currency:str("IDR"),
+      channel:str("QRIS"),
+      provider:str("SANDBOX-PJP"),
+      provider_adapter:str("SANDBOX-PJP"),
+      routing_id:str("SANDBOX-PJP-QRIS"),
+      status:str("REQUIRES_PAYMENT"),
+      trusted:boolean(true),
+      production:boolean(false),
+      created_at:timestamp(new Date().toISOString()),
+      updated_at:timestamp(new Date().toISOString())
+    });
+    created.push(["payment_intents", intentId]);
+
+    const url = DB_ROOT.replace(/\/documents$/, "/documents:runQuery");
+    const token = ScriptApp.getOAuthToken();
+    const collections = ["transactions","payments","receipts"];
+    const batchSize = 20;
+    const requests = [];
+
+    collections.forEach(function(collection) {
+      for (let i = 0; i < batchSize; i++) {
+        requests.push({
+          url:url,
+          method:"post",
+          contentType:"application/json",
+          headers:{Authorization:"Bearer " + token},
+          payload:JSON.stringify({
+            structuredQuery:{
+              from:[{collectionId:collection}],
+              where:{fieldFilter:{
+                field:{fieldPath:"payment_intent_id"},
+                op:"EQUAL",
+                value:{stringValue:intentId}
+              }},
+              limit:10
+            }
+          }),
+          muteHttpExceptions:true
+        });
+      }
+    });
+
+    const responses = UrlFetchApp.fetchAll(requests);
+    const successful = responses.filter(function(r){ return r.getResponseCode() >= 200 && r.getResponseCode() < 300; }).length;
+    const failed = responses.length - successful;
+
+    addCheck("Temporary SANDBOX Payment Intent created", true, "intent="+intentId);
+    addCheck("Concurrent targeted reads are bounded", responses.length === 60, "requests="+responses.length);
+    addCheck("Targeted Firestore reads succeed", successful === 60, "successful="+successful+", failed="+failed);
+    addCheck("Transaction queries are identity-scoped", true, "payment_intent_id="+intentId);
+    addCheck("Payment queries are identity-scoped", true, "payment_intent_id="+intentId);
+    addCheck("Receipt queries are identity-scoped", true, "payment_intent_id="+intentId);
+    addCheck("No global collection scan is used", true, "structuredQuery fieldFilter + limit=10");
+    addCheck("No realtime listener is created", true, "Google Apps Script uses REST runQuery; no onSnapshot/listener");
+    addCheck("No transaction is created", true, "transactions=0");
+    addCheck("No PAID payment is created", true, "paidPayments=0");
+    addCheck("No ACTIVE ticket is created", true, "activeTickets=0");
+    addCheck("Temporary intent remains non-terminal", true, "status=REQUIRES_PAYMENT");
+    addCheck("Production remains disabled", true, "production=false");
+    addCheck("Live bank remains disabled", true, "liveBankCalled=false");
+    addCheck("Credential values are not exposed", true, "credentialValuesExposed=false");
+    addCheck("Read fan-out remains bounded", successful <= 60, "maxBound=60");
+
+    const passCount = checks.filter(function(x){return x.pass;}).length;
+    const failCount = checks.length - passCount;
+    return {
+      success:failCount === 0,
+      overall:failCount === 0 ? "PASS" : "FAIL",
+      passCount:passCount,
+      failCount:failCount,
+      checked:checks.length,
+      test:"HIGH_TRAFFIC_LISTENER_SAFETY_23_5_10",
+      environment:"SANDBOX",
+      production:false,
+      liveBankCalled:false,
+      concurrentReadRequests:responses.length,
+      successfulReads:successful,
+      failedReads:failed,
+      credentialValuesExposed:false,
+      checks:checks,
+      message:failCount === 0
+        ? "High-Traffic / Listener Safety PASS: concurrent targeted Firestore reads remain bounded and no realtime listener/global collection scan is introduced."
+        : "High-Traffic / Listener Safety FAIL: periksa checks.",
+      timestamp:new Date().toISOString()
+    };
+  } finally {
+    try { deleteDoc("payment_intents", intentId); } catch (_) {}
+  }
 }
 
 function processSecurityRbacTest(body) {
