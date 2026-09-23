@@ -36,7 +36,7 @@ async function parseJsonResponseSafe(response, label) {
     }
 }
 const BeePay = {
-    version: "23.5.7",
+    version: "23.5.8",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -50,6 +50,8 @@ const BeePay = {
         this.bindWebhookSimulation();
         this.bindProviderAdapter();
         this.bindProviderConfig();
+        this.bindSecurityRbac();
+        this.bindDashboardSearch();
         this.bindPaymentRouting();
         this.bindPaymentReconciliation();
         this.bindMerchantContract();
@@ -183,6 +185,8 @@ const BeePay = {
                 document.getElementById("providerAdapterPanel").hidden = !yes;
             if (document.getElementById("providerConfigPanel"))
                 document.getElementById("providerConfigPanel").hidden = !yes;
+            if (document.getElementById("securityRbacPanel"))
+                document.getElementById("securityRbacPanel").hidden = !yes;
             if (document.getElementById("paymentRoutingPanel"))
                 document.getElementById("paymentRoutingPanel").hidden = !yes;
             if (document.getElementById("paymentReconciliationPanel"))
@@ -341,6 +345,64 @@ const BeePay = {
     },
     bindProviderAdapter() {
         document.getElementById("providerAdapterTestBtn")?.addEventListener("click", () => this.runProviderAdapterTest())
+    },
+    bindSecurityRbac() {
+        document.getElementById("securityRbacTestBtn")?.addEventListener("click", async () => {
+            await this.runSecurityRbacTest();
+        });
+    },
+    bindDashboardSearch() {
+        const input = document.getElementById("dashboardSearch");
+        const clear = document.getElementById("dashboardSearchClear");
+        if (!input) return;
+        const apply = () => {
+            const q = String(input.value || "").trim().toLowerCase();
+            const sections = Array.from(document.querySelectorAll("main > section"))
+                .filter(section => section.id !== "dashboardSearchPanel" && !section.classList.contains("hero") && !section.classList.contains("auth-panel") && !section.classList.contains("system-status"));
+            let visible = 0;
+            sections.forEach(section => {
+                const haystack = String(section.textContent || "").toLowerCase();
+                const match = !q || haystack.includes(q);
+                section.classList.toggle("search-filtered-out", !match);
+                if (match) visible++;
+            });
+            const count = document.getElementById("dashboardSearchCount");
+            if (count) count.textContent = q ? `${visible} modul/test cocok` : "Semua modul ditampilkan";
+        };
+        input.addEventListener("input", apply);
+        clear?.addEventListener("click", () => {
+            input.value = "";
+            input.focus();
+            apply();
+        });
+    },
+    async runSecurityRbacTest() {
+        const m = document.getElementById("securityRbacTestMessage");
+        if (!m) return;
+        if (!auth || !currentUser) {
+            m.textContent = "Login admin terlebih dahulu.";
+            return;
+        }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
+            m.textContent = "API Apps Script belum dikonfigurasi.";
+            return;
+        }
+        m.textContent = "Menjalankan Security / Authorization / RBAC / Access Control Test...";
+        try {
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({action: "sandbox_security_rbac_test", idToken})
+            });
+            const result = await parseJsonResponseSafe(response, "Security / RBAC Test");
+            if (!result.success && result.overall !== "FAIL") throw new Error(result.error || "Security / RBAC Test gagal.");
+            const detail = (result.checks || []).map(x => `${x.pass ? "PASS" : "FAIL"}: ${x.name}${x.detail ? ` (${x.detail})` : ""}`).join(" · ");
+            m.textContent = `Security / Authorization / RBAC / Access Control ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${result.message || result.error || ""} ${detail}`;
+        } catch (e) {
+            console.error(e);
+            m.textContent = "Security / RBAC Test gagal: " + e.message;
+        }
     },
     bindProviderConfig() {
         document.getElementById("providerConfigStatusBtn")?.addEventListener("click", () => this.loadProviderConfigStatus());

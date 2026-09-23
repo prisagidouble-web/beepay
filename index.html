@@ -2,7 +2,7 @@
 <html lang="id"><head>
 <link rel="icon" href="/favicon.svg">
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BeePay — Phase 23.5.7</title><link rel="stylesheet" href="css/style.css"></head>
+<title>BeePay — Phase 23.5.8</title><link rel="stylesheet" href="css/style.css"></head>
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
@@ -19,6 +19,10 @@
 <div id="rolePanel" class="role-panel" hidden><strong id="adminName"></strong><span id="adminRole"></span></div>
 </section>
 <section class="system-status"><div class="status-card"><span class="status-label">System</span><span id="systemStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">API</span><span id="apiStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">Firebase</span><span id="firebaseStatus" class="status-value">Checking...</span></div></section>
+<section id="dashboardSearchPanel" class="dashboard-search panel">
+<div class="section-heading"><h2>Cari Modul &amp; Test</h2><p>Cari berdasarkan nama modul, test, tombol, atau kata kunci. Pencarian hanya memfilter tampilan browser dan tidak membuat listener Firestore.</p></div>
+<div class="search-row"><input id="dashboardSearch" type="search" autocomplete="off" placeholder="Cari: RBAC, reconciliation, merchant, webhook, concurrency..." aria-label="Cari modul dan test"><button id="dashboardSearchClear" type="button">Bersihkan</button><span id="dashboardSearchCount" class="search-count">Semua modul ditampilkan</span></div>
+</section>
 <section id="sandboxOrderPanel" class="panel" hidden>
 <div class="section-heading"><h2>Sandbox Order Fixture</h2><p>Membuat order khusus SANDBOX melalui trusted backend agar dapat dipakai untuk test Payment Intent. Tidak membuat order production.</p></div>
 <div class="form-grid">
@@ -80,7 +84,7 @@
 <div id="recoveryReplayTestMessage" class="message"></div>
 </section>
 <section id="finalRegressionPanel" class="panel" hidden>
-<div class="section-heading"><h2>Final Regression &amp; Production Readiness</h2><p>Pemeriksaan akhir BeePay 23.5.7. Semua pengujian tetap SANDBOX, memakai trusted backend, dan tidak membuat realtime listener Firestore di browser.</p></div>
+<div class="section-heading"><h2>Final Regression &amp; Production Readiness</h2><p>Pemeriksaan akhir BeePay 23.5.8. Semua pengujian tetap SANDBOX, memakai trusted backend, dan tidak membuat realtime listener Firestore di browser.</p></div>
 <div class="form-grid final-test-actions">
 <button id="endToEndTestBtn" type="button">Run End-to-End Test</button>
 <button id="sandboxAuditFinalBtn" type="button">Run Sandbox Audit</button>
@@ -143,6 +147,13 @@
 <div id="providerConfigStatusMessage" class="message"></div>
 <div id="providerConfigTestMessage" class="message"></div>
 </section>
+<section id="securityRbacPanel" class="panel" hidden>
+<div class="section-heading"><h2>Security / Authorization / RBAC / Access Control</h2><p>Menguji authorization di trusted backend: role normalization, unknown/inactive role rejection, privilege escalation, permission matrix, provider access, dan boundary sandbox/live. Test ini tidak mengubah business object dan tidak memanggil bank/PJP.</p></div>
+<div class="form-grid">
+<button id="securityRbacTestBtn" type="button">Run Security / RBAC Test</button>
+</div>
+<div id="securityRbacTestMessage" class="message security-test-output"></div>
+</section>
 <section id="providerAdapterPanel" class="panel" hidden>
 <div class="section-heading"><h2>Provider Adapter &amp; Webhook Security</h2><p>Memisahkan aturan provider dari core BeePay dan menguji signature, event mapping, mismatch, idempotency, serta larangan provider live. Fase ini masih SANDBOX.</p></div>
 <div class="form-grid">
@@ -194,6 +205,6 @@
 <form id="healthCheckForm" class="form-grid"><select id="healthComponent"><option value="FIREBASE_AUTH">Firebase Auth</option><option value="FIRESTORE">Firestore</option><option value="SECURITY_RULES">Security Rules</option><option value="SANDBOX">Payment Sandbox</option><option value="AUDIT">Audit Log</option><option value="TICKET_GATE">Ticket Activation Gate</option></select><select id="healthStatus"><option value="PASS">PASS</option><option value="WARN">WARN</option><option value="FAIL">FAIL</option></select><input id="healthNote" placeholder="Catatan"><button type="submit">Record Health Check</button></form>
 <div id="healthMessage" class="message"></div><div id="healthList" class="list"></div></section><section class="panel"><div class="section-heading"><h2>Final Pre-Production Audit</h2><p>Checklist akhir sebelum uji coba penuh tanpa bank. Semua hasil hanya bersifat internal/testing.</p></div>
 <form id="auditChecklistForm" class="form-grid"><select id="auditCheckItem"><option value="AUTH">Authentication</option><option value="FIRESTORE">Firestore</option><option value="RULES">Security Rules</option><option value="RBAC">RBAC</option><option value="PAYMENT_FLOW">Payment Flow</option><option value="IDEMPOTENCY">Idempotency</option><option value="TICKET_GATE">Ticket Gate</option><option value="AUDIT_LOG">Audit Log</option><option value="SANDBOX">Sandbox Isolation</option><option value="BACKUP">Backup/Recovery</option></select><select id="auditCheckStatus"><option value="PASS">PASS</option><option value="WARN">WARN</option><option value="FAIL">FAIL</option></select><input id="auditCheckNote" placeholder="Catatan audit"><button type="submit">Record Audit Check</button></form>
-<div id="auditChecklistMessage" class="message"></div><div id="auditChecklistList" class="list"></div></section></main><footer class="footer">BeePay © 2026 — Phase 23.5.7</footer>
+<div id="auditChecklistMessage" class="message"></div><div id="auditChecklistList" class="list"></div></section></main><footer class="footer">BeePay © 2026 — Phase 23.5.8</footer>
 <script src="config/config.js"></script><script type="module" src="js/app.optimized.js"></script>
 </body></html>
