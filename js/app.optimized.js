@@ -49,9 +49,8 @@ const BeePay = {
         this.bindWebhook();
         this.bindWebhookSimulation();
         this.bindProviderAdapter();
-        this.bindProviderConfig();
         this.bindSecurityRbac();
-        this.bindDashboardSearch();
+        this.bindProviderConfig();
         this.bindPaymentRouting();
         this.bindPaymentReconciliation();
         this.bindMerchantContract();
@@ -75,6 +74,7 @@ const BeePay = {
         this.bindFinalRegressionTests();
         this.bindHealth();
         this.bindFinalAudit();
+        this.bindModuleSearch();
         await this.checkAPI();
         await this.initFirebase();
         };
@@ -183,10 +183,10 @@ const BeePay = {
                 document.getElementById("webhookLifecyclePanel").hidden = !yes;
             if (document.getElementById("providerAdapterPanel"))
                 document.getElementById("providerAdapterPanel").hidden = !yes;
-            if (document.getElementById("providerConfigPanel"))
-                document.getElementById("providerConfigPanel").hidden = !yes;
             if (document.getElementById("securityRbacPanel"))
                 document.getElementById("securityRbacPanel").hidden = !yes;
+            if (document.getElementById("providerConfigPanel"))
+                document.getElementById("providerConfigPanel").hidden = !yes;
             if (document.getElementById("paymentRoutingPanel"))
                 document.getElementById("paymentRoutingPanel").hidden = !yes;
             if (document.getElementById("paymentReconciliationPanel"))
@@ -347,62 +347,16 @@ const BeePay = {
         document.getElementById("providerAdapterTestBtn")?.addEventListener("click", () => this.runProviderAdapterTest())
     },
     bindSecurityRbac() {
-        document.getElementById("securityRbacTestBtn")?.addEventListener("click", async () => {
-            await this.runSecurityRbacTest();
-        });
+        document.getElementById("securityRbacTestBtn")?.addEventListener("click", () => this.runSecurityRbacTest());
     },
-    bindDashboardSearch() {
-        const input = document.getElementById("dashboardSearch");
-        const clear = document.getElementById("dashboardSearchClear");
+    bindModuleSearch() {
+        const input = document.getElementById("moduleSearchInput");
+        const clear = document.getElementById("moduleSearchClearBtn");
         if (!input) return;
-        const apply = () => {
-            const q = String(input.value || "").trim().toLowerCase();
-            const sections = Array.from(document.querySelectorAll("main > section"))
-                .filter(section => section.id !== "dashboardSearchPanel" && !section.classList.contains("hero") && !section.classList.contains("auth-panel") && !section.classList.contains("system-status"));
-            let visible = 0;
-            sections.forEach(section => {
-                const haystack = String(section.textContent || "").toLowerCase();
-                const match = !q || haystack.includes(q);
-                section.classList.toggle("search-filtered-out", !match);
-                if (match) visible++;
-            });
-            const count = document.getElementById("dashboardSearchCount");
-            if (count) count.textContent = q ? `${visible} modul/test cocok` : "Semua modul ditampilkan";
-        };
+        const apply = () => this.applyModuleSearch(input.value || "");
         input.addEventListener("input", apply);
-        clear?.addEventListener("click", () => {
-            input.value = "";
-            input.focus();
-            apply();
-        });
-    },
-    async runSecurityRbacTest() {
-        const m = document.getElementById("securityRbacTestMessage");
-        if (!m) return;
-        if (!auth || !currentUser) {
-            m.textContent = "Login admin terlebih dahulu.";
-            return;
-        }
-        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
-            m.textContent = "API Apps Script belum dikonfigurasi.";
-            return;
-        }
-        m.textContent = "Menjalankan Security / Authorization / RBAC / Access Control Test...";
-        try {
-            const idToken = await currentUser.getIdToken(false);
-            const response = await fetch(config.API_URL, {
-                method: "POST",
-                headers: {"Content-Type": "text/plain;charset=utf-8"},
-                body: JSON.stringify({action: "sandbox_security_rbac_test", idToken})
-            });
-            const result = await parseJsonResponseSafe(response, "Security / RBAC Test");
-            if (!result.success && result.overall !== "FAIL") throw new Error(result.error || "Security / RBAC Test gagal.");
-            const detail = (result.checks || []).map(x => `${x.pass ? "PASS" : "FAIL"}: ${x.name}${x.detail ? ` (${x.detail})` : ""}`).join(" · ");
-            m.textContent = `Security / Authorization / RBAC / Access Control ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${result.message || result.error || ""} ${detail}`;
-        } catch (e) {
-            console.error(e);
-            m.textContent = "Security / RBAC Test gagal: " + e.message;
-        }
+        clear?.addEventListener("click", () => { input.value = ""; apply(); input.focus(); });
+        apply();
     },
     bindProviderConfig() {
         document.getElementById("providerConfigStatusBtn")?.addEventListener("click", () => this.loadProviderConfigStatus());
@@ -1996,6 +1950,60 @@ const BeePay = {
         } catch (e) {
             console.error(e);
             m.textContent = "Universal Merchant Payment API Test gagal: " + e.message
+        }
+    },
+    applyModuleSearch(rawQuery) {
+        const q = String(rawQuery || "").trim().toLowerCase();
+        const count = document.getElementById("moduleSearchCount");
+        const results = document.getElementById("moduleSearchResults");
+        const candidates = Array.from(document.querySelectorAll("main > section.panel:not(#moduleSearchPanel), main > section.modules"));
+        const visibleMatches = [];
+        candidates.forEach((el) => {
+            if (!el.dataset.searchBaseDisplay) el.dataset.searchBaseDisplay = el.style.display || "";
+            const text = String(el.textContent || "").toLowerCase();
+            const match = !q || text.includes(q);
+            el.style.display = match ? el.dataset.searchBaseDisplay : "none";
+            if (match && !el.hidden) {
+                const heading = el.querySelector("h2,h3")?.textContent?.trim() || "Module";
+                visibleMatches.push({el, heading});
+            }
+        });
+        if (!q) {
+            if (count) count.textContent = "Semua modul ditampilkan";
+            if (results) results.innerHTML = "";
+            return;
+        }
+        if (count) count.textContent = `${visibleMatches.length} modul cocok`;
+        if (results) {
+            results.innerHTML = visibleMatches.slice(0, 12).map(({el, heading}) => `<button type="button" class="module-result-chip" data-module-target="${this.escape(el.id || "")}">${this.escape(heading)}</button>`).join("");
+            results.querySelectorAll("[data-module-target]").forEach(btn => btn.addEventListener("click", () => {
+                const target = document.getElementById(btn.dataset.moduleTarget);
+                target?.scrollIntoView({behavior:"smooth", block:"start"});
+            }));
+        }
+    },
+    async runSecurityRbacTest() {
+        const m = document.getElementById("securityRbacTestMessage");
+        if (!m) return;
+        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
+        m.textContent = "Menjalankan Security / Authorization / RBAC / Access Control Test...";
+        try {
+            const idToken = await currentUser.getIdToken(false);
+            const requestedRole = document.getElementById("securityRbacRequestedRole")?.value.trim() || "SUPER_ADMIN";
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type":"text/plain;charset=utf-8"},
+                body: JSON.stringify({action:"security_rbac_test", idToken, requestedRole}),
+                cache: "no-store"
+            });
+            const result = await parseJsonResponseSafe(response, "Security / RBAC Test");
+            if (!response.ok || !result.success) throw new Error(result.error || "Security / RBAC Test gagal.");
+            const detail = (result.checks || []).map(x => `${x.pass ? "PASS" : "FAIL"}: ${x.name}${x.detail ? ` (${x.detail})` : ""}`).join(" · ");
+            m.textContent = `Security / Authorization / RBAC / Access Control ${result.overall}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${result.message || ""} ${detail}`;
+        } catch (e) {
+            console.error(e);
+            m.textContent = "Security / RBAC Test gagal: " + (e.message || e);
         }
     },
     async runProviderAdapterTest() {

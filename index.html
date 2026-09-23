@@ -6,7 +6,7 @@
 <body>
 <header class="topbar"><div class="brand"><div class="brand-logo">B</div><div><div class="brand-name">BeePay</div><div class="brand-subtitle">Payment Engine</div></div></div><div id="authState" class="auth-state">Guest</div></header>
 <main class="container">
-<section class="hero"><h1>BeePay</h1><p>Payment processing foundation dengan payment intent dan idempotency.</p></section>
+<section class="hero"><h1>BeePay</h1><p>Payment processing foundation dengan payment intent, idempotency, RBAC, reconciliation, dan provider security.</p></section>
 <section class="auth-panel">
 <h2>Admin Login</h2>
 <p id="authMessage">Silakan login menggunakan akun admin BeePay.</p>
@@ -18,11 +18,12 @@
 <div class="auth-actions"><button id="logoutButton" type="button" hidden>Logout</button></div>
 <div id="rolePanel" class="role-panel" hidden><strong id="adminName"></strong><span id="adminRole"></span></div>
 </section>
-<section class="system-status"><div class="status-card"><span class="status-label">System</span><span id="systemStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">API</span><span id="apiStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">Firebase</span><span id="firebaseStatus" class="status-value">Checking...</span></div></section>
-<section id="dashboardSearchPanel" class="dashboard-search panel">
+<section id="moduleSearchPanel" class="panel module-search-panel">
 <div class="section-heading"><h2>Cari Modul &amp; Test</h2><p>Cari berdasarkan nama modul, test, tombol, atau kata kunci. Pencarian hanya memfilter tampilan browser dan tidak membuat listener Firestore.</p></div>
-<div class="search-row"><input id="dashboardSearch" type="search" autocomplete="off" placeholder="Cari: RBAC, reconciliation, merchant, webhook, concurrency..." aria-label="Cari modul dan test"><button id="dashboardSearchClear" type="button">Bersihkan</button><span id="dashboardSearchCount" class="search-count">Semua modul ditampilkan</span></div>
+<div class="module-search-row"><input id="moduleSearchInput" type="search" autocomplete="off" placeholder="Cari: RBAC, reconciliation, merchant, webhook, concurrency..."><button id="moduleSearchClearBtn" type="button">Bersihkan</button><span id="moduleSearchCount" class="module-search-count">Semua modul ditampilkan</span></div>
+<div id="moduleSearchResults" class="module-search-results" aria-live="polite"></div>
 </section>
+<section class="system-status"><div class="status-card"><span class="status-label">System</span><span id="systemStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">API</span><span id="apiStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">Firebase</span><span id="firebaseStatus" class="status-value">Checking...</span></div></section>
 <section id="sandboxOrderPanel" class="panel" hidden>
 <div class="section-heading"><h2>Sandbox Order Fixture</h2><p>Membuat order khusus SANDBOX melalui trusted backend agar dapat dipakai untuk test Payment Intent. Tidak membuat order production.</p></div>
 <div class="form-grid">
@@ -84,7 +85,7 @@
 <div id="recoveryReplayTestMessage" class="message"></div>
 </section>
 <section id="finalRegressionPanel" class="panel" hidden>
-<div class="section-heading"><h2>Final Regression &amp; Production Readiness</h2><p>Pemeriksaan akhir BeePay 23.5.8. Semua pengujian tetap SANDBOX, memakai trusted backend, dan tidak membuat realtime listener Firestore di browser.</p></div>
+<div class="section-heading"><h2>Final Regression &amp; Production Readiness</h2><p>Pemeriksaan akhir BeePay 23.5.7. Semua pengujian tetap SANDBOX, memakai trusted backend, dan tidak membuat realtime listener Firestore di browser.</p></div>
 <div class="form-grid final-test-actions">
 <button id="endToEndTestBtn" type="button">Run End-to-End Test</button>
 <button id="sandboxAuditFinalBtn" type="button">Run Sandbox Audit</button>
@@ -148,11 +149,12 @@
 <div id="providerConfigTestMessage" class="message"></div>
 </section>
 <section id="securityRbacPanel" class="panel" hidden>
-<div class="section-heading"><h2>Security / Authorization / RBAC / Access Control</h2><p>Menguji authorization di trusted backend: role normalization, unknown/inactive role rejection, privilege escalation, permission matrix, provider access, dan boundary sandbox/live. Test ini tidak mengubah business object dan tidak memanggil bank/PJP.</p></div>
+<div class="section-heading"><h2>Security / Authorization / RBAC / Access Control</h2><p>Menguji authentication, role backend, privilege escalation, permission matrix, dan boundary production. Role efektif selalu dibaca dari <code>admin_users</code> di trusted backend; browser tidak dipercaya untuk menentukan privilege.</p></div>
 <div class="form-grid">
+<input id="securityRbacRequestedRole" value="SUPER_ADMIN" placeholder="Requested role (test only)">
 <button id="securityRbacTestBtn" type="button">Run Security / RBAC Test</button>
 </div>
-<div id="securityRbacTestMessage" class="message security-test-output"></div>
+<div id="securityRbacTestMessage" class="message"></div>
 </section>
 <section id="providerAdapterPanel" class="panel" hidden>
 <div class="section-heading"><h2>Provider Adapter &amp; Webhook Security</h2><p>Memisahkan aturan provider dari core BeePay dan menguji signature, event mapping, mismatch, idempotency, serta larangan provider live. Fase ini masih SANDBOX.</p></div>

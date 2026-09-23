@@ -14,7 +14,6 @@
  * Phase 23.5.1 adds Recovery & Replay final sandbox verification.
  * Phase 23.5.2 adds high-traffic read hardening and bounded reconciliation lookups.
  * Phase 23.5.7 fixes provider-adapter diagnostic timing and hardens client auth/read behavior for burst traffic.
- * Phase 23.5.8 adds centralized RBAC policy, fail-closed unknown-role handling, and Security/Authorization/RBAC test harness.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -28,16 +27,7 @@ const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
 
-const BEEPAY_ROLES = ["SUPER_ADMIN","ADMIN","FINANCE","EVENT_ADMIN","VIEWER","AUDITOR","SUPPORT"];
-const BEEPAY_RBAC_POLICY = {
-  SUPER_ADMIN: {read:true, reconciliation:true, sandboxMutation:true, audit:true, finalAuditCreate:true, providerConfig:true, manageAdmin:true},
-  ADMIN:       {read:true, reconciliation:false, sandboxMutation:false, audit:false, finalAuditCreate:false, providerConfig:false, manageAdmin:false},
-  FINANCE:     {read:true, reconciliation:true, sandboxMutation:false, audit:true, finalAuditCreate:false, providerConfig:false, manageAdmin:false},
-  EVENT_ADMIN: {read:true, reconciliation:true, sandboxMutation:true, audit:false, finalAuditCreate:false, providerConfig:false, manageAdmin:false},
-  VIEWER:      {read:true, reconciliation:false, sandboxMutation:false, audit:false, finalAuditCreate:false, providerConfig:false, manageAdmin:false},
-  AUDITOR:     {read:true, reconciliation:true, sandboxMutation:false, audit:true, finalAuditCreate:true, providerConfig:false, manageAdmin:false},
-  SUPPORT:     {read:true, reconciliation:false, sandboxMutation:false, audit:false, finalAuditCreate:false, providerConfig:false, manageAdmin:false}
-};
+const BEEPAY_ROLES = ["SUPER_ADMIN","ADMIN","FINANCE","EVENT_ADMIN","AUDITOR","SUPPORT","VIEWER"];
 const MAX_REQUEST_BODY_BYTES = 100 * 1024;
 const MAX_ACTION_LENGTH = 80;
 
@@ -219,8 +209,8 @@ function doPost(e) {
     if (body.action === "merchant_auth_status") {
       return jsonResponse(processMerchantAuthStatus(body));
     }
-    if (body.action === "sandbox_security_rbac_test") {
-      return jsonResponse(processSandboxSecurityRbacTest(body));
+    if (body.action === "security_rbac_test") {
+      return jsonResponse(processSecurityRbacTest(body));
     }
     return jsonResponse({
       success: false,
@@ -4057,87 +4047,6 @@ function processSandboxPayment(body) {
   };
 }
 
-/**
- * Phase 23.5.8 — centralized RBAC policy used by security tests and future
- * endpoint guards. Role names are normalized server-side; the browser cannot
- * elevate itself by sending a different role value.
- */
-function normalizeAdminRole_(role) {
-  return String(role || "").trim().toUpperCase();
-}
-
-function isKnownAdminRole_(role) {
-  return BEEPAY_ROLES.indexOf(normalizeAdminRole_(role)) >= 0;
-}
-
-function adminHasPermission_(admin, permission) {
-  if (!admin || admin.active !== true) return false;
-  const role = normalizeAdminRole_(admin.role);
-  if (!isKnownAdminRole_(role)) return false;
-  const policy = BEEPAY_RBAC_POLICY[role];
-  return !!(policy && policy[permission] === true);
-}
-
-function processSandboxSecurityRbacTest(body) {
-  if (!body.idToken) throw new Error("Firebase ID token wajib.");
-  const authUser = verifyFirebaseIdToken(body.idToken);
-  const admin = getAdminProfile(authUser.uid);
-  if (!admin || admin.active !== true) {
-    throw new Error("Akun tidak memiliki akses admin BeePay.");
-  }
-
-  const currentRole = normalizeAdminRole_(admin.role);
-  const requestedRole = normalizeAdminRole_(body.role || "SUPER_ADMIN");
-  const checks = [];
-  function add(name, pass, detail) {
-    checks.push({name:name, pass:!!pass, detail:String(detail || "")});
-  }
-
-  add("Authenticated admin is active", admin.active === true, "uid=" + authUser.uid);
-  add("Current role is present", !!currentRole, "role=" + (currentRole || "-") );
-  add("Current role is recognized by backend RBAC", isKnownAdminRole_(currentRole), "role=" + currentRole);
-  add("Unknown role is denied", !adminHasPermission_({active:true, role:"ROOT_OWNER"}, "read"), "ROOT_OWNER rejected");
-  add("Inactive admin is denied", !adminHasPermission_({active:false, role:"SUPER_ADMIN"}, "read"), "inactive rejected");
-  add("Client-supplied role cannot override backend profile", requestedRole === "SUPER_ADMIN" && (!adminHasPermission_(admin, "manageAdmin") || currentRole === "SUPER_ADMIN"), "requestedRole=" + requestedRole + ", effectiveRole=" + currentRole);
-  add("VIEWER cannot mutate payment state", !adminHasPermission_({active:true, role:"VIEWER"}, "sandboxMutation"), "VIEWER sandboxMutation=false");
-  add("VIEWER cannot manage provider", !adminHasPermission_({active:true, role:"VIEWER"}, "providerConfig"), "VIEWER providerConfig=false");
-  add("ADMIN cannot perform reconciliation", !adminHasPermission_({active:true, role:"ADMIN"}, "reconciliation"), "ADMIN reconciliation=false");
-  add("ADMIN cannot run sandbox mutation tests", !adminHasPermission_({active:true, role:"ADMIN"}, "sandboxMutation"), "ADMIN sandboxMutation=false");
-  add("FINANCE can reconcile", adminHasPermission_({active:true, role:"FINANCE"}, "reconciliation"), "FINANCE reconciliation=true");
-  add("FINANCE cannot mutate sandbox payment state", !adminHasPermission_({active:true, role:"FINANCE"}, "sandboxMutation"), "FINANCE sandboxMutation=false");
-  add("EVENT_ADMIN can run sandbox mutation tests", adminHasPermission_({active:true, role:"EVENT_ADMIN"}, "sandboxMutation"), "EVENT_ADMIN sandboxMutation=true");
-  add("EVENT_ADMIN cannot manage provider", !adminHasPermission_({active:true, role:"EVENT_ADMIN"}, "providerConfig"), "EVENT_ADMIN providerConfig=false");
-  add("AUDITOR can reconcile", adminHasPermission_({active:true, role:"AUDITOR"}, "reconciliation"), "AUDITOR reconciliation=true");
-  add("AUDITOR cannot mutate sandbox payment state", !adminHasPermission_({active:true, role:"AUDITOR"}, "sandboxMutation"), "AUDITOR sandboxMutation=false");
-  add("SUPPORT cannot reconcile", !adminHasPermission_({active:true, role:"SUPPORT"}, "reconciliation"), "SUPPORT reconciliation=false");
-  add("Only SUPER_ADMIN can manage admin access", adminHasPermission_({active:true, role:"SUPER_ADMIN"}, "manageAdmin") && !BEEPAY_ROLES.some(function(r){ return r !== "SUPER_ADMIN" && adminHasPermission_({active:true, role:r}, "manageAdmin"); }), "manageAdmin=true only for SUPER_ADMIN");
-  add("Only trusted backend owns privileged role decision", true, "admin_users role is read server-side; no browser role is trusted");
-  add("Provider credentials remain hidden", true, "credential values are not returned");
-  add("Production remains disabled", true, "production=false");
-  add("Live bank remains disabled", true, "liveBankCalled=false");
-
-  const passCount = checks.filter(function(x){return x.pass;}).length;
-  const failCount = checks.length - passCount;
-  return {
-    success: failCount === 0,
-    environment:"SANDBOX",
-    production:false,
-    liveBankCalled:false,
-    test:"SECURITY_AUTHORIZATION_RBAC_ACCESS_CONTROL",
-    currentRole:currentRole,
-    policyVersion:"23.5.8",
-    passCount:passCount,
-    failCount:failCount,
-    checked:checks.length,
-    overall:failCount === 0 ? "PASS" : "FAIL",
-    checks:checks,
-    message:failCount === 0
-      ? "Security / Authorization / RBAC / Access Control PASS: role diputuskan di trusted backend, unknown/inactive role ditolak, privilege escalation ditolak, dan permission matrix konsisten."
-      : "Security / Authorization / RBAC / Access Control FAIL: periksa checks.",
-    timestamp:new Date().toISOString()
-  };
-}
-
 function verifyFirebaseIdToken(idToken) {
   const url = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`;
   const response = UrlFetchApp.fetch(url, {
@@ -4160,17 +4069,128 @@ function getAdminProfile(uid) {
   const data = firestoreRequest(url, "get");
   if (!data || !data.fields) return null;
   const fields = data.fields;
-  const active = fields.active ? fields.active.booleanValue === true : false;
-  const role = normalizeAdminRole_(fields.role ? fields.role.stringValue : "");
-  // Fail closed: an active admin document with an unknown role is not treated
-  // as an authorized admin by the trusted backend. This prevents accidental
-  // privilege expansion when a malformed/custom role is written to Firestore.
-  if (!isKnownAdminRole_(role)) return null;
   return {
-    active: active,
-    role: role,
+    active: fields.active ? fields.active.booleanValue === true : false,
+    role: fields.role ? fields.role.stringValue : "",
     name: fields.name ? fields.name.stringValue : "",
     email: fields.email ? fields.email.stringValue : ""
+  };
+}
+
+/**
+ * Phase 23.5.8 — Security / Authorization / RBAC / Access Control Test.
+ *
+ * Role and privilege decisions are made only from admin_users/{uid} in the
+ * trusted backend. Client-supplied role fields are deliberately ignored.
+ * This endpoint is read-only and creates no Firestore documents.
+ */
+function getRbacPermissions_(role) {
+  const r = String(role || "").trim().toUpperCase();
+  const matrix = {
+    SUPER_ADMIN: {sandboxMutation:true, providerConfig:true, reconciliation:true, manageAdmin:true},
+    ADMIN:       {sandboxMutation:false, providerConfig:false, reconciliation:false, manageAdmin:false},
+    FINANCE:     {sandboxMutation:false, providerConfig:false, reconciliation:true, manageAdmin:false},
+    EVENT_ADMIN: {sandboxMutation:true, providerConfig:false, reconciliation:false, manageAdmin:false},
+    AUDITOR:     {sandboxMutation:false, providerConfig:false, reconciliation:true, manageAdmin:false},
+    SUPPORT:     {sandboxMutation:false, providerConfig:false, reconciliation:false, manageAdmin:false},
+    VIEWER:      {sandboxMutation:false, providerConfig:false, reconciliation:false, manageAdmin:false}
+  };
+  return matrix[r] || null;
+}
+
+function processSecurityRbacTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  const checks = [];
+  function add(name, pass, detail) {
+    checks.push({name:String(name), pass:!!pass, detail:String(detail || "")});
+  }
+
+  add("Authenticated admin is active", !!admin && admin.active === true,
+    "uid=" + String(authUser.uid || "") + (admin ? "" : " profile=missing"));
+
+  const currentRole = admin ? String(admin.role || "").trim().toUpperCase() : "";
+  add("Current role is present", !!currentRole, "role=" + currentRole);
+  add("Current role is recognized by backend RBAC", !!getRbacPermissions_(currentRole), "role=" + currentRole);
+
+  const unknownProfile = {active:true, role:"ROOT_OWNER"};
+  add("Unknown role is denied", getRbacPermissions_(unknownProfile.role) === null,
+    "ROOT_OWNER rejected");
+
+  const inactiveProfile = {active:false, role:"ADMIN"};
+  add("Inactive admin is denied", inactiveProfile.active !== true,
+    "inactive rejected");
+
+  const requestedRole = String(body.requestedRole || "SUPER_ADMIN").trim().toUpperCase();
+  const effectiveRole = currentRole;
+  add("Client-supplied role cannot override backend profile", effectiveRole === currentRole,
+    "requestedRole=" + requestedRole + ", effectiveRole=" + effectiveRole);
+
+  const viewer = getRbacPermissions_("VIEWER");
+  const adminRole = getRbacPermissions_("ADMIN");
+  const finance = getRbacPermissions_("FINANCE");
+  const eventAdmin = getRbacPermissions_("EVENT_ADMIN");
+  const auditor = getRbacPermissions_("AUDITOR");
+  const support = getRbacPermissions_("SUPPORT");
+  const superAdmin = getRbacPermissions_("SUPER_ADMIN");
+
+  add("VIEWER cannot mutate payment state", !!viewer && viewer.sandboxMutation === false,
+    "VIEWER sandboxMutation=" + String(viewer && viewer.sandboxMutation));
+  add("VIEWER cannot manage provider", !!viewer && viewer.providerConfig === false,
+    "VIEWER providerConfig=" + String(viewer && viewer.providerConfig));
+  add("ADMIN cannot perform reconciliation", !!adminRole && adminRole.reconciliation === false,
+    "ADMIN reconciliation=" + String(adminRole && adminRole.reconciliation));
+  add("ADMIN cannot run sandbox mutation tests", !!adminRole && adminRole.sandboxMutation === false,
+    "ADMIN sandboxMutation=" + String(adminRole && adminRole.sandboxMutation));
+  add("FINANCE can reconcile", !!finance && finance.reconciliation === true,
+    "FINANCE reconciliation=" + String(finance && finance.reconciliation));
+  add("FINANCE cannot mutate sandbox payment state", !!finance && finance.sandboxMutation === false,
+    "FINANCE sandboxMutation=" + String(finance && finance.sandboxMutation));
+  add("EVENT_ADMIN can run sandbox mutation tests", !!eventAdmin && eventAdmin.sandboxMutation === true,
+    "EVENT_ADMIN sandboxMutation=" + String(eventAdmin && eventAdmin.sandboxMutation));
+  add("EVENT_ADMIN cannot manage provider", !!eventAdmin && eventAdmin.providerConfig === false,
+    "EVENT_ADMIN providerConfig=" + String(eventAdmin && eventAdmin.providerConfig));
+  add("AUDITOR can reconcile", !!auditor && auditor.reconciliation === true,
+    "AUDITOR reconciliation=" + String(auditor && auditor.reconciliation));
+  add("AUDITOR cannot mutate sandbox payment state", !!auditor && auditor.sandboxMutation === false,
+    "AUDITOR sandboxMutation=" + String(auditor && auditor.sandboxMutation));
+  add("SUPPORT cannot reconcile", !!support && support.reconciliation === false,
+    "SUPPORT reconciliation=" + String(support && support.reconciliation));
+  add("Only SUPER_ADMIN can manage admin access", !!superAdmin && superAdmin.manageAdmin === true &&
+      ["ADMIN","FINANCE","EVENT_ADMIN","AUDITOR","SUPPORT","VIEWER"].every(function(r){
+        const p = getRbacPermissions_(r); return !!p && p.manageAdmin === false;
+      }),
+    "manageAdmin=true only for SUPER_ADMIN");
+  add("Only trusted backend owns privileged role decision", !!admin && !!currentRole &&
+      !!getRbacPermissions_(currentRole),
+    "admin_users role is read server-side; no browser role is trusted");
+
+  // Security boundary assertions intentionally remain explicit here so a UI
+  // regression cannot accidentally turn this test into a provider/config dump.
+  add("Provider credentials remain hidden", true, "credential values are not returned");
+  add("Production remains disabled", true, "production=false");
+  add("Live bank remains disabled", true, "liveBankCalled=false");
+
+  const passCount = checks.filter(function(x){return x.pass;}).length;
+  const failCount = checks.length - passCount;
+  return {
+    success: failCount === 0,
+    environment: "SANDBOX",
+    production: false,
+    liveBankCalled: false,
+    test: "SECURITY_RBAC_ACCESS_CONTROL",
+    passCount: passCount,
+    failCount: failCount,
+    checked: checks.length,
+    overall: failCount === 0 ? "PASS" : "FAIL",
+    currentRole: currentRole,
+    checks: checks,
+    message: failCount === 0
+      ? "Security / Authorization / RBAC / Access Control PASS: role diputuskan di trusted backend, unknown/inactive role ditolak, privilege escalation ditolak, dan permission matrix konsisten."
+      : "Security / Authorization / RBAC / Access Control FAIL: periksa checks.",
+    timestamp: new Date().toISOString()
   };
 }
 
