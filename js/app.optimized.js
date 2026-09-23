@@ -863,36 +863,41 @@ const BeePay = {
     },
     async createAuditEvent() {
         const m = document.getElementById("auditMessage");
-        if (!db || !currentUser) {
+        if (!currentUser) {
             m.textContent = "Login terlebih dahulu.";
-            return
+            return;
         }
-        const action = document.getElementById("auditAction").value.trim()
-          , target = document.getElementById("auditTarget").value.trim()
-          , severity = document.getElementById("auditSeverity").value;
+        const action = document.getElementById("auditAction").value.trim();
+        const target = document.getElementById("auditTarget").value.trim();
+        const severity = document.getElementById("auditSeverity").value;
         if (!action || !target) {
             m.textContent = "Action dan target wajib diisi.";
-            return
+            return;
         }
-        const id = `AUD-${Date.now()}`
-          , data = {
-            audit_id: id,
-            actor_uid: currentUser.uid,
-            action,
-            target_id: target,
-            severity,
-            source: "admin-ui",
-            trusted: false,
-            created_at: serverTimestamp()
-        };
         try {
-            await addDoc(collection(db, "audit_logs"), data);
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({
+                    action: "create_audit_event",
+                    idToken,
+                    auditAction: action,
+                    targetId: target,
+                    severity
+                }),
+                cache: "no-store"
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || result.message || "Gagal mencatat audit.");
+            }
             document.getElementById("auditForm").reset();
             this.invalidateReadCache("audit_logs");
-            m.textContent = `Audit ${id} dicatat.`;
-            await this.loadAudits()
+            m.textContent = `Audit ${result.auditId} dicatat oleh trusted backend.`;
+            await this.loadAudits();
         } catch (e) {
-            m.textContent = "Gagal mencatat audit: " + e.message
+            m.textContent = "Gagal mencatat audit: " + e.message;
         }
     },
     async loadAudits() {
