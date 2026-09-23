@@ -142,28 +142,41 @@ service cloud.firestore {
     // Sandbox is intentionally isolated from production.
     match /sandbox_runs/{runId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR']);
-      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN'])
+        && request.resource.data.created_by == request.auth.uid
+        && request.resource.data.production == false
+        && request.resource.data.real_bank_called == false;
       allow update, delete: if false;
     }
 
     // Failure tests are non-production and cannot affect payment/tickets.
     match /failure_tests/{testId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
-      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN'])
+        && request.resource.data.created_by == request.auth.uid
+        && request.resource.data.production == false
+        && request.resource.data.real_bank_called == false;
       allow update, delete: if false;
     }
 
     // Operational health checks.
     match /health_checks/{checkId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
-      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'EVENT_ADMIN'])
+        && request.resource.data.created_by == request.auth.uid
+        && request.resource.data.production == false
+        && request.resource.data.bank_called == false;
       allow update, delete: if false;
     }
 
     // Final audit records are evidence only; they cannot grant production approval.
     match /final_audits/{auditId} {
       allow read: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR', 'FINANCE']);
-      allow create: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR']);
+      allow create: if hasAnyRole(['SUPER_ADMIN', 'AUDITOR'])
+        && request.resource.data.created_by == request.auth.uid
+        && request.resource.data.production == false
+        && request.resource.data.bank_called == false
+        && request.resource.data.approval == false;
       allow update, delete: if false;
     }
 

@@ -21,12 +21,24 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.3";
+const BEEPAY_VERSION = "23.5.4";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
 
 const BEEPAY_ROLES = ["SUPER_ADMIN","ADMIN","FINANCE","EVENT_ADMIN","VIEWER"];
+const MAX_REQUEST_BODY_BYTES = 100 * 1024;
+const MAX_ACTION_LENGTH = 80;
+
+function assertRequestEnvelope_(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("Request body tidak valid.");
+  }
+  const action = String(body.action || "").trim();
+  if (!action || action.length > MAX_ACTION_LENGTH || !/^[a-z0-9_]+$/.test(action)) {
+    throw new Error("Action request tidak valid.");
+  }
+}
 
 function doGet() {
   return jsonResponse({
@@ -43,6 +55,7 @@ function doGet() {
 function doPost(e) {
   try {
     const body = parseRequestBody(e);
+    assertRequestEnvelope_(body);
     if (body.action === "sandbox_payment") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxPayment(body);
@@ -2076,6 +2089,7 @@ function authenticateMerchantApiKey_(merchantId,apiKey) {
   var id=validateMerchantId_(merchantId);
   var key=String(apiKey||"").trim();
   if(!key) throw new Error("Merchant API key wajib.");
+  if(key.length>256) throw new Error("Merchant API key tidak valid.");
   var props=PropertiesService.getScriptProperties();
   var secret=String(props.getProperty(merchantPropertyKey_(id))||"").trim();
   if(!secret) throw new Error("Merchant credential tidak ditemukan.");
@@ -2085,9 +2099,19 @@ function authenticateMerchantApiKey_(merchantId,apiKey) {
   var m=decodeFirestoreFields(doc.fields||{});
   if(String(m.status||"").toUpperCase()!=="ACTIVE") throw new Error("Merchant tidak aktif.");
   if(m.production===true || String(m.environment||"SANDBOX").toUpperCase()!=="SANDBOX") throw new Error("Merchant environment tidak diizinkan.");
-  if(fingerprint!==String(m.api_key_fingerprint||"")) throw new Error("Merchant API key tidak valid.");
+  const storedFingerprint=String(m.api_key_fingerprint||"");
+  if(!secureEqualHex_(fingerprint,storedFingerprint)) throw new Error("Merchant API key tidak valid.");
   return {merchantId:id,applicationId:String(m.application_id||""),environment:"SANDBOX",production:false,
     apiKeyFingerprint:fingerprint,credentialValidated:true};
+}
+
+function secureEqualHex_(a,b) {
+  const x=String(a||"").toLowerCase();
+  const y=String(b||"").toLowerCase();
+  if(x.length!==y.length) return false;
+  let diff=0;
+  for(let i=0;i<x.length;i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return diff===0;
 }
 
 /**
@@ -4054,8 +4078,16 @@ function arrayValue(values) { return {arrayValue: {values: (values || []).map(fu
 
 function parseRequestBody(e) {
   if (!e || !e.postData || !e.postData.contents) return {};
-  try { return JSON.parse(e.postData.contents); }
-  catch (_) { throw new Error("Invalid JSON body"); }
+  const raw=String(e.postData.contents);
+  if(raw.length > MAX_REQUEST_BODY_BYTES) throw new Error("Request body terlalu besar.");
+  try {
+    const parsed=JSON.parse(raw);
+    if(!parsed || typeof parsed!=="object" || Array.isArray(parsed)) throw new Error("Request body tidak valid.");
+    return parsed;
+  } catch (err) {
+    if(String(err && err.message || "").indexOf("Request body tidak valid")>=0) throw err;
+    throw new Error("Invalid JSON body");
+  }
 }
 
 function jsonResponse(data) {
