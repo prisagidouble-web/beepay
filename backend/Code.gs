@@ -22,7 +22,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.10";
+const BEEPAY_VERSION = "23.5.11";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -219,6 +219,11 @@ function doPost(e) {
     }
     if (body.action === "sandbox_high_traffic_listener_safety_test") {
       return jsonResponse(processSandboxHighTrafficListenerSafetyTest(body));
+    }
+    if (body.action === "create_audit_event") {
+      return jsonResponse(withScriptLock(function() {
+        return processCreateAuditEvent(body);
+      }));
     }
     return jsonResponse({
       success: false,
@@ -4052,6 +4057,63 @@ function processSandboxPayment(body) {
       ? "Sandbox payment berhasil. Payment PAID dan ticket ACTIVE dibuat oleh trusted backend."
       : `Sandbox payment tercatat dengan outcome ${outcome}.`,
     timestamp: now
+  };
+}
+
+
+/**
+ * Trusted Security & Audit event writer.
+ * Browser never writes audit_logs directly. The backend verifies the Firebase
+ * ID token, resolves the admin profile server-side, validates the event fields,
+ * and writes the immutable audit record with trusted metadata.
+ */
+function processCreateAuditEvent(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun admin tidak aktif atau tidak ditemukan.");
+  if (BEEPAY_ROLES.indexOf(String(admin.role || "").toUpperCase()) === -1) {
+    throw new Error("Role admin tidak dikenali.");
+  }
+
+  const action = String(body.auditAction || body.actionName || "").trim();
+  const target = String(body.targetId || "").trim();
+  const severity = String(body.severity || "INFO").trim().toUpperCase();
+  if (!action || action.length > MAX_ACTION_LENGTH || !/^[a-zA-Z0-9_:-]+$/.test(action)) {
+    throw new Error("Audit action tidak valid.");
+  }
+  if (!target || target.length > 200) throw new Error("Target ID wajib diisi dan maksimal 200 karakter.");
+  if (["INFO","WARNING","SECURITY"].indexOf(severity) === -1) {
+    throw new Error("Severity audit tidak valid.");
+  }
+
+  const now = new Date().toISOString();
+  const auditId = "AUD-" + new Date().getTime() + "-" + Utilities.getUuid().slice(0,8);
+  createDocument("audit_logs", auditId, {
+    audit_id: str(auditId),
+    actor_uid: str(authUser.uid),
+    action: str(action),
+    target_id: str(target),
+    severity: str(severity),
+    source: str("trusted-backend"),
+    trusted: boolean(true),
+    production: boolean(false),
+    bank_called: boolean(false),
+    created_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    auditId: auditId,
+    action: action,
+    targetId: target,
+    severity: severity,
+    actorUid: authUser.uid,
+    role: String(admin.role || ""),
+    trusted: true,
+    production: false,
+    liveBankCalled: false,
+    message: "Audit event dicatat oleh trusted backend."
   };
 }
 
