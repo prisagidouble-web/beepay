@@ -36,7 +36,7 @@ async function parseJsonResponseSafe(response, label) {
     }
 }
 const BeePay = {
-    version: "23.5.8",
+    version: "23.5.9",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -50,6 +50,7 @@ const BeePay = {
         this.bindWebhookSimulation();
         this.bindProviderAdapter();
         this.bindSecurityRbac();
+        this.bindRateLimit();
         this.bindProviderConfig();
         this.bindPaymentRouting();
         this.bindPaymentReconciliation();
@@ -348,6 +349,9 @@ const BeePay = {
     },
     bindSecurityRbac() {
         document.getElementById("securityRbacTestBtn")?.addEventListener("click", () => this.runSecurityRbacTest());
+    },
+    bindRateLimit() {
+        document.getElementById("rateLimitTestBtn")?.addEventListener("click", () => this.runRateLimitTest());
     },
     bindModuleSearch() {
         const input = document.getElementById("moduleSearchInput");
@@ -1581,63 +1585,102 @@ const BeePay = {
         const m = document.getElementById("mismatchConcurrencyTestMessage");
         if (!auth || !currentUser) {
             m.textContent = "Login admin terlebih dahulu.";
-            return;
+            return
         }
         if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
             m.textContent = "API Apps Script belum dikonfigurasi.";
-            return;
+            return
         }
-        let specimen = null;
-        let verified = false;
         m.textContent = "Menyiapkan mismatch concurrency specimen SANDBOX...";
         try {
             const idToken = await currentUser.getIdToken(false);
             const prepResponse = await fetch(config.API_URL, {
                 method: "POST",
-                headers: { "Content-Type": "text/plain;charset=utf-8" },
-                body: JSON.stringify({ action: "sandbox_mismatch_concurrency_prepare", idToken }),
-                cache: "no-store"
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify({
+                    action: "sandbox_mismatch_concurrency_prepare",
+                    idToken
+                })
             });
-            const prep = await parseJsonResponseSafe(prepResponse, "Mismatch concurrency prepare");
-            if (!prep.success) throw new Error(prep.error || "Gagal menyiapkan mismatch concurrency test.");
-            specimen = prep;
-            const n = Math.max(1, Number(prep.requestCountPerCase || 10));
-            const base = { action: "sandbox_webhook", idToken, paymentIntentId: prep.paymentIntentId, provider: prep.provider, providerEventId: prep.providerEventId, eventType: prep.eventType, providerReference: prep.providerReference, payloadHash: "MISMATCH-HASH-2351", targetStatus: prep.targetStatus, signatureValid: true };
-            const wrongAmount = { ...base, amount: prep.wrongAmount, currency: prep.currency };
-            const wrongCurrency = { ...base, amount: prep.amount, currency: prep.wrongCurrency };
-            const invalidSignature = { ...base, amount: prep.amount, currency: prep.currency, signatureValid: false };
+            const prep = await prepResponse.json();
+            if (!prep.success)
+                throw new Error(prep.error || "Gagal menyiapkan mismatch concurrency test.");
+            const n = Number(prep.requestCountPerCase || 10);
+            const base = {
+                action: "sandbox_webhook",
+                idToken,
+                paymentIntentId: prep.paymentIntentId,
+                provider: prep.provider,
+                providerEventId: prep.providerEventId,
+                eventType: prep.eventType,
+                providerReference: prep.providerReference,
+                payloadHash: "MISMATCH-HASH-2351",
+                targetStatus: prep.targetStatus,
+                signatureValid: true
+            };
+            const wrongAmount = {
+                ...base,
+                amount: prep.wrongAmount,
+                currency: prep.currency
+            };
+            const wrongCurrency = {
+                ...base,
+                amount: prep.amount,
+                currency: prep.wrongCurrency
+            };
+            const invalidSignature = {
+                ...base,
+                amount: prep.amount,
+                currency: prep.currency,
+                signatureValid: false
+            };
             m.textContent = `Menjalankan ${n * 3} request mismatch secara bersamaan...`;
-            const bodies = [...Array.from({ length: n }, () => wrongAmount), ...Array.from({ length: n }, () => wrongCurrency), ...Array.from({ length: n }, () => invalidSignature)];
+            const bodies = [...Array.from({
+                length: n
+            }, () => wrongAmount), ...Array.from({
+                length: n
+            }, () => wrongCurrency), ...Array.from({
+                length: n
+            }, () => invalidSignature)];
             const results = await Promise.all(bodies.map(body => fetch(config.API_URL, {
-                method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(body), cache: "no-store"
-            }).then(r => parseJsonResponseSafe(r, "Mismatch webhook"))));
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify(body)
+            }).then(async r => {
+                try {
+                    return await r.json()
+                } catch (e) {
+                    return {
+                        success: false,
+                        error: "Invalid JSON response"
+                    }
+                }
+            }
+            )));
             const rejected = results.filter(x => x.rejected || x.success === false).length;
             const verifyResponse = await fetch(config.API_URL, {
-                method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
-                body: JSON.stringify({ action: "sandbox_mismatch_concurrency_verify", idToken, paymentIntentId: prep.paymentIntentId, providerEventId: prep.providerEventId, requestCount: n }),
-                cache: "no-store"
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify({
+                    action: "sandbox_mismatch_concurrency_verify",
+                    idToken,
+                    paymentIntentId: prep.paymentIntentId,
+                    providerEventId: prep.providerEventId,
+                    requestCount: n
+                })
             });
-            const result = await parseJsonResponseSafe(verifyResponse, "Mismatch concurrency verify");
-            if (!result.success && !result.overall) throw new Error(result.error || "Mismatch concurrency verify gagal.");
-            verified = true;
+            const result = await verifyResponse.json();
             const detail = (result.checks || []).map(c => `${c.pass ? "PASS" : "FAIL"}: ${c.name}${c.detail ? ` (${c.detail})` : ""}`).join(" · ");
             m.textContent = `Mismatch Concurrency Test ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. Concurrent requests: ${results.length} · rejected/error: ${rejected}. ${result.message || result.error || ""} ${detail}`;
         } catch (e) {
             console.error(e);
-            m.textContent = "Mismatch Concurrency Test gagal: " + (e.message || e);
-        } finally {
-            if (specimen && !verified) {
-                try {
-                    const cleanupToken = await currentUser.getIdToken(false);
-                    const cleanupResponse = await fetch(config.API_URL, {
-                        method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" },
-                        body: JSON.stringify({ action: "sandbox_mismatch_concurrency_cleanup", idToken: cleanupToken, paymentIntentId: specimen.paymentIntentId }),
-                        cache: "no-store"
-                    });
-                    const cleanup = await parseJsonResponseSafe(cleanupResponse, "Mismatch concurrency cleanup");
-                    if (!cleanup.success) console.warn("Mismatch concurrency cleanup warning:", cleanup);
-                } catch (cleanupError) { console.warn("Mismatch concurrency cleanup failed:", cleanupError); }
-            }
+            m.textContent = "Mismatch Concurrency Test gagal: " + e.message
         }
     },
     async runRecoveryReplayTest() {
@@ -1942,6 +1985,21 @@ const BeePay = {
                 target?.scrollIntoView({behavior:"smooth", block:"start"});
             }));
         }
+    },
+    async runRateLimitTest() {
+        const m = document.getElementById("rateLimitTestMessage");
+        if (!m) return;
+        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
+        m.textContent = "Menjalankan Rate Limit & Abuse Protection Test...";
+        try {
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_rate_limit_test",idToken}),cache:"no-store"});
+            const result = await parseJsonResponseSafe(response, "Rate Limit & Abuse Protection Test");
+            if (!response.ok || !result.success) throw new Error(result.error || "Rate Limit & Abuse Protection Test gagal.");
+            const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
+            m.textContent=`Rate Limit & Abuse Protection ${result.overall}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
+        } catch(e) { console.error(e); m.textContent="Rate Limit / Abuse Protection Test gagal: "+(e.message||e); }
     },
     async runSecurityRbacTest() {
         const m = document.getElementById("securityRbacTestMessage");
