@@ -162,6 +162,11 @@ function doPost(e) {
         return processSandboxMismatchConcurrencyVerify(body);
       }));
     }
+    if (body.action === "sandbox_mismatch_concurrency_cleanup") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxMismatchConcurrencyCleanup(body);
+      }));
+    }
     if (body.action === "sandbox_recovery_replay_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxRecoveryReplayTest(body);
@@ -1598,7 +1603,7 @@ function processSandboxMismatchConcurrencyVerify(body){
   const requestCount=Math.max(1,Number(body.requestCount||10));
   const checks=[];
   function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
-  function related(collection,field,value){return listDocuments(collection,500).filter(function(x){return String(x.data[field]||"")===String(value);});}
+  function related(collection,field,value,limit){return queryCollectionByField_(collection,field,value,limit || 20);}
   function deleteDocument_(collection,id){
     const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
     const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
@@ -1641,6 +1646,31 @@ function processSandboxMismatchConcurrencyVerify(body){
     paymentIntentId:intentId,providerEventId:providerEventId,requestedRequests:requestCount*3,checks:checks,passCount:passCount,failCount:failCount,
     credentialValuesExposed:false,cleanupCount:cleanup.length,
     message:failCount===0?"Concurrent wrong amount, currency, and invalid-signature requests were rejected without creating PAID payment effects.":"Mismatch concurrency test menemukan kegagalan. Periksa checks.",timestamp:new Date().toISOString()};
+}
+
+function processSandboxMismatchConcurrencyCleanup(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Mismatch Concurrency Test.");
+  const intentId=requiredText(body.paymentIntentId,"Payment Intent ID");
+  const cleanup=[];
+  function deleteById_(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const response=UrlFetchApp.fetch(url,{method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true});
+    const code=response.getResponseCode();
+    if(code!==404 && (code<200 || code>=300)) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
+  }
+  ["tickets","payments","transactions","webhooks"].forEach(function(collection){
+    const docs=queryCollectionByField_(collection,"payment_intent_id",intentId,50);
+    docs.forEach(function(x){
+      try { deleteById_(collection,x.id); cleanup.push(collection+"/"+x.id); } catch(e) {}
+    });
+  });
+  try { deleteById_("payment_intents",intentId); cleanup.push("payment_intents/"+intentId); } catch(e) {}
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,paymentIntentId:intentId,cleanupCount:cleanup.length,cleanup:cleanup,credentialValuesExposed:false,message:"Temporary mismatch specimen cleaned up safely.",timestamp:new Date().toISOString()};
 }
 
 function processSandboxConcurrencyPrepare(body){
