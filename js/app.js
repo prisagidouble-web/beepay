@@ -8,7 +8,7 @@ let db = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
 const BeePay = {
-    version: "23.5.1",
+    version: "23.5.2",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -219,94 +219,23 @@ const BeePay = {
         )
     },
     setupLazyAdminReads() {
-        // Avoid a 12-collection read burst immediately after login.
-        // Each non-sensitive list is fetched once, when it approaches the viewport.
-        // User-triggered actions may still call their normal loadX() methods.
-        // Reconciliation is excluded from this observer and remains button-triggered.
+        // HIGH-TRAFFIC SAFE MODE (23.5.2): do not start Firestore list reads
+        // merely because an admin logged in or a list entered the viewport.
+        // The previous IntersectionObserver could turn a long admin page into
+        // multiple Firestore reads immediately after login. Under real traffic
+        // this creates unnecessary WebChannel activity and download usage.
+        //
+        // All existing loadX() methods remain intact and may still be called by
+        // explicit user actions / successful operations. Only the automatic
+        // post-login observer is disabled.
         if (this.lazyReadObserver) {
             try {
-                this.lazyReadObserver.disconnect()
+                this.lazyReadObserver.disconnect();
             } catch (_) {}
+            this.lazyReadObserver = null;
         }
         this.lazyReadLoaded = new Set();
-
-        const jobs = [["intentList", "loadIntents"], ["checkoutList", "loadCheckouts"], ["webhookList", "loadWebhooks"], ["verificationList", "loadVerifications"], ["resultList", "loadResults"], ["ticketList", "loadTickets"], // Reconciliation is intentionally manual-trigger only.
-        // It queries the financial ledger through the trusted backend.
-        ["auditList", "loadAudits"], ["sandboxList", "loadSandboxRuns"], ["failureTestList", "loadFailureTests"], ["healthList", "loadHealthChecks"], ["auditChecklistList", "loadFinalAudits"]];
-
-        const readQueue = [];
-        let readBusy = false;
-
-        const drainReadQueue = () => {
-            if (readBusy || !readQueue.length)
-                return;
-            const job = readQueue.shift();
-            if (!job || !job.element)
-                return drainReadQueue();
-            readBusy = true;
-            Promise.resolve().then( () => this[job.methodName]()).catch(e => {
-                console.error("Lazy read error:", job.methodName, e);
-                this.lazyReadLoaded.delete(job.methodName);
-            }
-            ).finally( () => {
-                readBusy = false;
-                setTimeout(drainReadQueue, 120);
-            }
-            );
-        }
-        ;
-
-        const loadJob = (element, methodName) => {
-            if (!element || this.lazyReadLoaded.has(methodName))
-                return;
-            this.lazyReadLoaded.add(methodName);
-            readQueue.push({
-                element,
-                methodName
-            });
-            drainReadQueue();
-        }
-        ;
-
-        if ("IntersectionObserver" in window) {
-            this.lazyReadObserver = new IntersectionObserver(entries => {
-                entries.forEach(entry => {
-                    if (!entry.isIntersecting)
-                        return;
-                    const methodName = entry.target.dataset.beepayLazyRead;
-                    loadJob(entry.target, methodName);
-                    this.lazyReadObserver.unobserve(entry.target);
-                }
-                );
-            }
-            ,{
-                root: null,
-                rootMargin: "120px 0px 120px 0px",
-                threshold: 0.01
-            });
-
-            jobs.forEach( ([elementId,methodName]) => {
-                const element = document.getElementById(elementId);
-                if (!element)
-                    return;
-                element.dataset.beepayLazyRead = methodName;
-                this.lazyReadObserver.observe(element);
-            }
-            );
-        } else {
-            // Older browsers: retain compatibility, but schedule reads with a small
-            // stagger so login does not create a single synchronous burst.
-            let delay = 0;
-            jobs.forEach( ([elementId,methodName]) => {
-                const element = document.getElementById(elementId);
-                if (!element)
-                    return;
-                element.dataset.beepayLazyRead = methodName;
-                setTimeout( () => loadJob(element, methodName), delay);
-                delay += 250;
-            }
-            );
-        }
+        this.lazyReadAutoDisabled = true;
     },
     async login() {
         if (!auth)
