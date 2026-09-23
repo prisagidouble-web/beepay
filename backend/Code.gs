@@ -21,7 +21,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.5";
+const BEEPAY_VERSION = "23.5.6";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -144,6 +144,11 @@ function doPost(e) {
     if (body.action === "sandbox_concurrency_verify") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxConcurrencyVerify(body);
+      }));
+    }
+    if (body.action === "sandbox_concurrency_cleanup") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxConcurrencyCleanup(body);
       }));
     }
     if (body.action === "sandbox_mismatch_concurrency_prepare") {
@@ -1746,6 +1751,37 @@ function processSandboxConcurrencyVerify(body){
   };
 }
 
+
+function processSandboxConcurrencyCleanup(body){
+  if(!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser=verifyFirebaseIdToken(body.idToken);
+  const admin=getAdminProfile(authUser.uid);
+  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role=String(admin.role||"").toUpperCase();
+  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Concurrency Test.");
+
+  const intentId=requiredText(body.paymentIntentId,"Payment Intent ID");
+  const collections=["tickets","payments","transactions","webhooks","audit_logs"];
+  const cleanup=[];
+  function deleteOne(collection,id){
+    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
+    const response=UrlFetchApp.fetch(url,{method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true});
+    const code=response.getResponseCode();
+    if(code!==404 && (code<200 || code>=300)) throw new Error(`Firestore DELETE ${code}`);
+    return code!==404;
+  }
+  collections.forEach(function(collection){
+    const docs=listDocuments(collection,500).filter(function(x){
+      return String(x.data.payment_intent_id||"")===intentId;
+    });
+    docs.forEach(function(x){
+      const id=String(x.id||x.data.ticket_id||x.data.payment_id||x.data.transaction_id||x.data.webhook_id||x.data.audit_id||"");
+      if(id){ try{ if(deleteOne(collection,id)) cleanup.push(collection+"/"+id); }catch(e){} }
+    });
+  });
+  try{ if(deleteOne("payment_intents",intentId)) cleanup.push("payment_intents/"+intentId); }catch(e){}
+  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,paymentIntentId:intentId,cleanupCount:cleanup.length,cleanup:cleanup,credentialValuesExposed:false,message:"Temporary concurrency specimen cleaned up safely.",timestamp:new Date().toISOString()};
+}
 
 function processSandboxRecoveryReplayTest(body){
   if(!body.idToken) throw new Error("Firebase ID token wajib.");

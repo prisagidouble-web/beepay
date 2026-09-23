@@ -7,8 +7,35 @@ let db = null
   , auth = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
+
+async function parseJsonResponseSafe(response, label) {
+    const contentType = String(response.headers?.get("content-type") || "").toLowerCase();
+    const raw = await response.text();
+    if (!raw) {
+        return {
+            success: false,
+            error: `${label}: respons kosong`,
+            httpStatus: response.status,
+            contentType
+        };
+    }
+    try {
+        const data = JSON.parse(raw);
+        return data && typeof data === "object"
+            ? data
+            : { success: false, error: `${label}: response JSON bukan object`, httpStatus: response.status, contentType };
+    } catch (error) {
+        return {
+            success: false,
+            error: `${label}: response bukan JSON (HTTP ${response.status}, ${contentType || "content-type tidak diketahui"})`,
+            httpStatus: response.status,
+            contentType,
+            responsePreview: raw.slice(0, 240)
+        };
+    }
+}
 const BeePay = {
-    version: "23.5.5",
+    version: "23.5.6",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -1410,22 +1437,43 @@ const BeePay = {
             m.textContent = "API Apps Script belum dikonfigurasi.";
             return
         }
+        let specimen = null;
+        let verified = false;
         m.textContent = "Menyiapkan concurrency specimen SANDBOX...";
         try {
             const idToken = await currentUser.getIdToken(true);
-            const prepResponse = await fetch(config.API_URL, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "text/plain;charset=utf-8"
-                },
-                body: JSON.stringify({
-                    action: "sandbox_concurrency_prepare",
-                    idToken
-                })
-            });
-            const prep = await prepResponse.json();
+            const postJson = async (body, label) => {
+                try {
+                    const response = await fetch(config.API_URL, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "text/plain;charset=utf-8"
+                        },
+                        body: JSON.stringify(body),
+                        cache: "no-store"
+                    });
+                    const data = await parseJsonResponseSafe(response, label);
+                    return { ...data, httpOk: response.ok };
+                } catch (error) {
+                    return {
+                        success: false,
+                        error: `${label}: ${error?.message || error}`,
+                        networkError: true
+                    };
+                }
+            };
+
+            const prep = await postJson({
+                action: "sandbox_concurrency_prepare",
+                idToken
+            }, "Concurrency prepare");
             if (!prep.success)
                 throw new Error(prep.error || "Gagal menyiapkan concurrency test.");
+
+            specimen = {
+                paymentIntentId: prep.paymentIntentId,
+                providerEventId: prep.providerEventId
+            };
             const webhookCount = Number(prep.concurrencyWebhookCount || 20);
             const reconCount = Number(prep.concurrencyReconciliationCount || 20);
             const webhookBody = {
@@ -1445,17 +1493,13 @@ const BeePay = {
             m.textContent = `Menjalankan ${webhookCount} duplicate webhook bersamaan...`;
             const webhookResults = await Promise.all(Array.from({
                 length: webhookCount
-            }, () => fetch(config.API_URL, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "text/plain;charset=utf-8"
-                },
-                body: JSON.stringify(webhookBody)
-            }).then(r => r.json())));
+            }, (_, i) => postJson(webhookBody, `Webhook #${i + 1}`)));
             const processed = webhookResults.filter(x => x.success && !x.existing).length;
             const idempotent = webhookResults.filter(x => x.success && x.existing && x.idempotent).length;
             const rejected = webhookResults.filter(x => x.rejected).length;
-            m.textContent = `Webhook concurrency selesai: ${processed} processed · ${idempotent} idempotent · ${rejected} rejected. Menjalankan ${reconCount} reconciliation query bersamaan...`;
+            const webhookErrors = webhookResults.filter(x => !x.success).length;
+            m.textContent = `Webhook concurrency selesai: ${processed} processed · ${idempotent} idempotent · ${rejected} rejected · ${webhookErrors} error. Menjalankan ${reconCount} reconciliation query bersamaan...`;
+
             const reconBody = {
                 action: "reconciliation_query",
                 idToken,
@@ -1463,35 +1507,52 @@ const BeePay = {
             };
             const reconResults = await Promise.all(Array.from({
                 length: reconCount
-            }, () => fetch(config.API_URL, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "text/plain;charset=utf-8"
-                },
-                body: JSON.stringify(reconBody)
-            }).then(r => r.json())));
+            }, (_, i) => postJson(reconBody, `Reconciliation #${i + 1}`)));
             const reconOk = reconResults.filter(x => x.success).length;
-            const verifyResponse = await fetch(config.API_URL, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "text/plain;charset=utf-8"
-                },
-                body: JSON.stringify({
-                    action: "sandbox_concurrency_verify",
-                    idToken,
-                    paymentIntentId: prep.paymentIntentId,
-                    providerEventId: prep.providerEventId,
-                    webhookCount,
-                    reconciliationCount: reconCount
-                })
-            });
-            const result = await verifyResponse.json();
+            const reconErrors = reconResults.length - reconOk;
+
+            const verify = await postJson({
+                action: "sandbox_concurrency_verify",
+                idToken,
+                paymentIntentId: prep.paymentIntentId,
+                providerEventId: prep.providerEventId,
+                webhookCount,
+                reconciliationCount: reconCount
+            }, "Concurrency verify");
+            if (!verify.success && verify.overall !== "PASS" && !Array.isArray(verify.checks))
+                throw new Error(verify.error || "Concurrency verify tidak mengembalikan hasil JSON yang valid.");
+            verified = true;
+            const result = verify;
             const detail = (result.checks || []).map(c => `${c.pass ? "PASS" : "FAIL"}: ${c.name}${c.detail ? ` (${c.detail})` : ""}`).join(" · ");
-            const traffic = `Concurrent webhook: ${webhookResults.length} · processed=${processed} · idempotent=${idempotent} · rejected=${rejected} · reconciliation queries=${reconResults.length} · successful=${reconOk}`;
-            m.textContent = `Concurrency Test ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${traffic}. ${result.message || result.error || ""} ${detail}`;
+            const traffic = `Concurrent webhook: ${webhookResults.length} · processed=${processed} · idempotent=${idempotent} · rejected=${rejected} · errors=${webhookErrors} · reconciliation queries=${reconResults.length} · successful=${reconOk} · errors=${reconErrors}`;
+            const diagnostics = [...webhookResults, ...reconResults].filter(x => !x.success).slice(0, 3).map(x => x.error || "unknown error").join(" | ");
+            m.textContent = `Concurrency Test ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${traffic}. ${result.message || result.error || ""} ${diagnostics ? `Diagnostics: ${diagnostics}.` : ""} ${detail}`;
         } catch (e) {
             console.error(e);
-            m.textContent = "Concurrency Test gagal: " + e.message
+            m.textContent = "Concurrency Test gagal: " + (e.message || e);
+        } finally {
+            // If prepare succeeded but verify could not complete, the next test
+            // should not inherit a stale sandbox specimen. All concurrent calls
+            // above are settled before this cleanup request is sent.
+            if (specimen && !verified) {
+                try {
+                    const cleanupToken = await currentUser.getIdToken(true);
+                    const cleanupResponse = await fetch(config.API_URL, {
+                        method: "POST",
+                        headers: { "Content-Type": "text/plain;charset=utf-8" },
+                        body: JSON.stringify({
+                            action: "sandbox_concurrency_cleanup",
+                            idToken: cleanupToken,
+                            paymentIntentId: specimen.paymentIntentId
+                        }),
+                        cache: "no-store"
+                    });
+                    const cleanup = await parseJsonResponseSafe(cleanupResponse, "Concurrency cleanup");
+                    if (!cleanup.success) console.warn("Concurrency cleanup warning:", cleanup);
+                } catch (cleanupError) {
+                    console.warn("Concurrency cleanup failed:", cleanupError);
+                }
+            }
         }
     },
 
