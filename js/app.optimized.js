@@ -8,7 +8,7 @@ let db = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
 const BeePay = {
-    version: "23.5.2",
+    version: "23.5.3",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -2238,4 +2238,10 @@ const BeePay = {
         }[c]))
     }
 };
+
+// Expose the singleton for production diagnostics and browser-console health checks.
+// The application remains module-scoped internally; this only adds a safe read-only
+// reference so diagnostics such as window.BeePay.version work without changing flow.
+window.BeePay = BeePay;
+
 document.addEventListener("DOMContentLoaded", () => BeePay.init());
