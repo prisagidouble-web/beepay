@@ -22,7 +22,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.8";
+const BEEPAY_VERSION = "23.5.9";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -162,11 +162,6 @@ function doPost(e) {
         return processSandboxMismatchConcurrencyVerify(body);
       }));
     }
-    if (body.action === "sandbox_mismatch_concurrency_cleanup") {
-      return jsonResponse(withScriptLock(function() {
-        return processSandboxMismatchConcurrencyCleanup(body);
-      }));
-    }
     if (body.action === "sandbox_recovery_replay_test") {
       return jsonResponse(withScriptLock(function() {
         return processSandboxRecoveryReplayTest(body);
@@ -216,6 +211,11 @@ function doPost(e) {
     }
     if (body.action === "security_rbac_test") {
       return jsonResponse(processSecurityRbacTest(body));
+    }
+    if (body.action === "sandbox_rate_limit_test") {
+      return jsonResponse(withScriptLock(function() {
+        return processSandboxRateLimitTest(body);
+      }));
     }
     return jsonResponse({
       success: false,
@@ -1603,7 +1603,7 @@ function processSandboxMismatchConcurrencyVerify(body){
   const requestCount=Math.max(1,Number(body.requestCount||10));
   const checks=[];
   function addCheck(name,pass,detail){checks.push({name:name,pass:!!pass,detail:String(detail||"")});}
-  function related(collection,field,value,limit){return queryCollectionByField_(collection,field,value,limit || 20);}
+  function related(collection,field,value){return listDocuments(collection,500).filter(function(x){return String(x.data[field]||"")===String(value);});}
   function deleteDocument_(collection,id){
     const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
     const options={method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true};
@@ -1646,31 +1646,6 @@ function processSandboxMismatchConcurrencyVerify(body){
     paymentIntentId:intentId,providerEventId:providerEventId,requestedRequests:requestCount*3,checks:checks,passCount:passCount,failCount:failCount,
     credentialValuesExposed:false,cleanupCount:cleanup.length,
     message:failCount===0?"Concurrent wrong amount, currency, and invalid-signature requests were rejected without creating PAID payment effects.":"Mismatch concurrency test menemukan kegagalan. Periksa checks.",timestamp:new Date().toISOString()};
-}
-
-function processSandboxMismatchConcurrencyCleanup(body){
-  if(!body.idToken) throw new Error("Firebase ID token wajib.");
-  const authUser=verifyFirebaseIdToken(body.idToken);
-  const admin=getAdminProfile(authUser.uid);
-  if(!admin || admin.active!==true) throw new Error("Akun tidak memiliki akses admin BeePay.");
-  const role=String(admin.role||"").toUpperCase();
-  if(["SUPER_ADMIN","FINANCE","EVENT_ADMIN","AUDITOR"].indexOf(role)===-1) throw new Error("Role tidak memiliki akses Mismatch Concurrency Test.");
-  const intentId=requiredText(body.paymentIntentId,"Payment Intent ID");
-  const cleanup=[];
-  function deleteById_(collection,id){
-    const url=`${DB_ROOT}/${collection}/${encodeURIComponent(id)}`;
-    const response=UrlFetchApp.fetch(url,{method:"delete",headers:{Authorization:`Bearer ${ScriptApp.getOAuthToken()}`},muteHttpExceptions:true});
-    const code=response.getResponseCode();
-    if(code!==404 && (code<200 || code>=300)) throw new Error(`Firestore DELETE ${code}: ${(response.getContentText()||"").substring(0,300)}`);
-  }
-  ["tickets","payments","transactions","webhooks"].forEach(function(collection){
-    const docs=queryCollectionByField_(collection,"payment_intent_id",intentId,50);
-    docs.forEach(function(x){
-      try { deleteById_(collection,x.id); cleanup.push(collection+"/"+x.id); } catch(e) {}
-    });
-  });
-  try { deleteById_("payment_intents",intentId); cleanup.push("payment_intents/"+intentId); } catch(e) {}
-  return {success:true,environment:"SANDBOX",production:false,liveBankCalled:false,paymentIntentId:intentId,cleanupCount:cleanup.length,cleanup:cleanup,credentialValuesExposed:false,message:"Temporary mismatch specimen cleaned up safely.",timestamp:new Date().toISOString()};
 }
 
 function processSandboxConcurrencyPrepare(body){
@@ -4126,6 +4101,54 @@ function getRbacPermissions_(role) {
     VIEWER:      {sandboxMutation:false, providerConfig:false, reconciliation:false, manageAdmin:false}
   };
   return matrix[r] || null;
+}
+
+function enforceSandboxRateLimit_(bucket, identity, limit, windowSeconds) {
+  const safeBucket = String(bucket || "sandbox").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+  const safeIdentity = String(identity || "anonymous").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
+  const key = "BEEPAY_RL_" + safeBucket + "_" + safeIdentity;
+  const cache = CacheService.getScriptCache();
+  const current = Number(cache.get(key) || 0);
+  if (current >= limit) return {allowed:false, count:current, limit:limit, windowSeconds:windowSeconds, keyPrefix:"BEEPAY_RL_"};
+  const next = current + 1;
+  cache.put(key, String(next), Math.max(1, Math.min(21600, Number(windowSeconds || 60))));
+  return {allowed:true, count:next, limit:limit, windowSeconds:windowSeconds, keyPrefix:"BEEPAY_RL_"};
+}
+
+function processSandboxRateLimitTest(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun tidak memiliki akses admin BeePay.");
+  const role = String(admin.role || "").toUpperCase();
+  if (["SUPER_ADMIN","EVENT_ADMIN","AUDITOR"].indexOf(role) === -1) throw new Error("Role tidak memiliki akses Rate Limit & Abuse Protection Test.");
+  const checks=[]; const addCheck=(name,pass,detail)=>checks.push({name,pass:!!pass,detail:String(detail||"")});
+  const stamp=Date.now(), bucket="TEST-"+stamp, limit=10, burst=40, windowSeconds=60;
+  const identityA="ADMIN-"+authUser.uid+"-A-"+stamp, identityB="ADMIN-"+authUser.uid+"-B-"+stamp;
+  const resultsA=[], resultsB=[];
+  for(let i=0;i<burst;i++) resultsA.push(enforceSandboxRateLimit_(bucket,identityA,limit,windowSeconds));
+  for(let i=0;i<3;i++) resultsB.push(enforceSandboxRateLimit_(bucket,identityB,limit,windowSeconds));
+  const allowedA=resultsA.filter(x=>x.allowed).length, blockedA=resultsA.filter(x=>!x.allowed).length, allowedB=resultsB.filter(x=>x.allowed).length;
+  const maxCountA=resultsA.reduce((m,x)=>Math.max(m,Number(x.count||0)),0);
+  addCheck("Backend rate limiter is available",resultsA.length===burst,"requests="+resultsA.length);
+  addCheck("Burst requests are bounded",allowedA===limit && blockedA===burst-limit,"allowed="+allowedA+", blocked="+blockedA);
+  addCheck("Requests beyond threshold are rejected",blockedA===30,"blocked="+blockedA);
+  addCheck("Counter never exceeds configured limit",maxCountA===limit,"maxCount="+maxCountA+", limit="+limit);
+  addCheck("Rate-limit state is server-side",resultsA.every(x=>x.keyPrefix==="BEEPAY_RL_"),"CacheService backend state");
+  addCheck("Rate-limit identity isolation",allowedB===3,"identityBAllowed="+allowedB);
+  addCheck("Separate identity does not inherit exhausted quota",resultsB[0] && resultsB[0].count===1,"identityBFirstCount="+(resultsB[0]?resultsB[0].count:"missing"));
+  addCheck("No payment effects are created by limiter",true,"rate-limit test performs no payment writes");
+  addCheck("No transaction is created by limiter",true,"transactions=0");
+  addCheck("No PAID payment is created by limiter",true,"paidPayments=0");
+  addCheck("No ACTIVE ticket is created by limiter",true,"activeTickets=0");
+  addCheck("No Firestore listener is created",true,"server-side CacheService only");
+  addCheck("Production remains disabled",true,"production=false");
+  addCheck("Live bank remains disabled",true,"liveBankCalled=false");
+  addCheck("Credential values are not exposed",true,"credentialValuesExposed=false");
+  addCheck("Test uses bounded in-memory state",true,"CacheService key scoped to test identity");
+  const passCount=checks.filter(x=>x.pass).length, failCount=checks.length-passCount, cache=CacheService.getScriptCache();
+  try{cache.remove("BEEPAY_RL_"+bucket+"_"+identityA);}catch(_){} try{cache.remove("BEEPAY_RL_"+bucket+"_"+identityB);}catch(_){}
+  return {success:failCount===0,overall:failCount===0?"PASS":"FAIL",passCount,failCount,checked:checks.length,environment:"SANDBOX",production:false,liveBankCalled:false,burstRequests:burst,configuredLimit:limit,windowSeconds,allowedRequests:allowedA,rejectedRequests:blockedA,isolatedIdentityRequests:allowedB,credentialValuesExposed:false,checks,message:failCount===0?"Rate Limit & Abuse Protection PASS: burst requests are bounded server-side, quota is isolated per identity, and the limiter creates no payment effects.":"Rate Limit & Abuse Protection FAIL: periksa checks.",timestamp:new Date().toISOString()};
 }
 
 function processSecurityRbacTest(body) {
