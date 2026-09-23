@@ -8,7 +8,7 @@ let db = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
 const BeePay = {
-    version: "23.5.4",
+    version: "23.5.5",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -219,7 +219,7 @@ const BeePay = {
         )
     },
     setupLazyAdminReads() {
-        // HIGH-TRAFFIC SAFE MODE (23.5.4): do not start Firestore list reads
+        // HIGH-TRAFFIC SAFE MODE (23.5.5): do not start Firestore list reads
         // merely because an admin logged in or a list entered the viewport.
         // The previous IntersectionObserver could turn a long admin page into
         // multiple Firestore reads immediately after login. Under real traffic
@@ -469,7 +469,12 @@ const BeePay = {
         try {
             const idToken = await currentUser.getIdToken();
             const controller = new AbortController();
-            timer = setTimeout( () => controller.abort(), 45000);
+            // E2E is an intentionally heavy SANDBOX lifecycle test. Keep a
+            // bounded client budget without changing payment runtime behavior.
+            // Normal admin audits retain the shorter timeout.
+            const requestBudgetMs = kind === "endToEnd" ? 90000 : 45000;
+            const requestStartedAt = performance.now();
+            timer = setTimeout( () => controller.abort(), requestBudgetMs);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -493,7 +498,7 @@ const BeePay = {
             box.textContent = `${labels[kind]} ${String(result.overall || "PASS").toUpperCase()}: PASS ${pass}${checked ? ` / ${checked}` : ""} · FAIL ${fail}. ${detail}`;
         } catch (e) {
             console.error(`BeePay ${labels[kind]} error:`, e);
-            box.textContent = `${labels[kind]} FAIL: ${e.name === "AbortError" ? "Request timeout setelah 45 detik." : (e.message || e)}`;
+            box.textContent = `${labels[kind]} FAIL: ${e.name === "AbortError" ? `Request timeout setelah ${Math.round(requestBudgetMs / 1000)} detik.` : (e.message || e)}`;
         } finally {
             if (timer)
                 clearTimeout(timer);

@@ -21,7 +21,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.4";
+const BEEPAY_VERSION = "23.5.5";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -2739,6 +2739,7 @@ function processSandboxProviderAdapterTest(body) {
     message: failCount === 0
       ? "Provider Adapter Security PASS: adapter SANDBOX-PJP, signature validation, event mapping, mismatch rejection, webhook idempotency, dan payment effects aman."
       : "Provider Adapter Security FAIL: periksa checks.",
+    durationMs: Date.now() - testStartedAtMs,
     timestamp: new Date().toISOString()
   };
 }
@@ -3147,6 +3148,7 @@ function processSandboxWebhook(body, trustedAuthUser) {
  * followed by rejected out-of-order FAILED and rejected invalid signature.
  */
 function processSandboxWebhookLifecycleTest(body) {
+  const testStartedAtMs = Date.now();
   if (!body.idToken) throw new Error("Firebase ID token wajib.");
   const authUser = verifyFirebaseIdToken(body.idToken);
   const admin = getAdminProfile(authUser.uid);
