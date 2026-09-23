@@ -50,6 +50,7 @@ const BeePay = {
         this.bindWebhookSimulation();
         this.bindProviderAdapter();
         this.bindSecurityRbac();
+        this.bindHighTrafficListenerSafety();
         this.bindRateLimit();
         this.bindProviderConfig();
         this.bindPaymentRouting();
@@ -349,6 +350,9 @@ const BeePay = {
     },
     bindSecurityRbac() {
         document.getElementById("securityRbacTestBtn")?.addEventListener("click", () => this.runSecurityRbacTest());
+    },
+    bindHighTrafficListenerSafety() {
+        document.getElementById("highTrafficListenerSafetyTestBtn")?.addEventListener("click", () => this.runHighTrafficListenerSafetyTest());
     },
     bindRateLimit() {
         document.getElementById("rateLimitTestBtn")?.addEventListener("click", () => this.runRateLimitTest());
@@ -2000,6 +2004,26 @@ const BeePay = {
             const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
             m.textContent=`Rate Limit & Abuse Protection ${result.overall}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
         } catch(e) { console.error(e); m.textContent="Rate Limit / Abuse Protection Test gagal: "+(e.message||e); }
+    },
+    async runHighTrafficListenerSafetyTest() {
+        const m = document.getElementById("highTrafficListenerSafetyTestMessage");
+        if (!m) return;
+        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
+        m.textContent = "Menjalankan High-Traffic / Listener Safety Test...";
+        try {
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {
+                method:"POST",
+                headers:{"Content-Type":"text/plain;charset=utf-8"},
+                body:JSON.stringify({action:"sandbox_high_traffic_listener_safety_test",idToken}),
+                cache:"no-store"
+            });
+            const result = await parseJsonResponseSafe(response, "High-Traffic / Listener Safety Test");
+            if (!response.ok || !result.success) throw new Error(result.error || "High-Traffic / Listener Safety Test gagal.");
+            const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
+            m.textContent=`High-Traffic / Listener Safety ${result.overall}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
+        } catch(e) { console.error(e); m.textContent="High-Traffic / Listener Safety Test gagal: "+(e.message||e); }
     },
     async runSecurityRbacTest() {
         const m = document.getElementById("securityRbacTestMessage");
