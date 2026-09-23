@@ -7,6 +7,7 @@ let db = null
   , auth = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
+const READ_INFLIGHT_MAX_MS = 30000;
 
 async function parseJsonResponseSafe(response, label) {
     const contentType = String(response.headers?.get("content-type") || "").toLowerCase();
@@ -35,7 +36,7 @@ async function parseJsonResponseSafe(response, label) {
     }
 }
 const BeePay = {
-    version: "23.5.6",
+    version: "23.5.7",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
@@ -136,7 +137,11 @@ const BeePay = {
         const pending = this.readInflight.get(key);
         if (pending)
             return pending;
-        const promise = getDocs(queryFactory()).then(snapshot => {
+        const readPromise = getDocs(queryFactory());
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Firestore read timeout")), READ_INFLIGHT_MAX_MS)
+        );
+        const promise = Promise.race([readPromise, timeoutPromise]).then(snapshot => {
             this.readCache.set(key, {at: Date.now(), snapshot});
             return snapshot;
         }).finally(() => {
@@ -722,7 +727,7 @@ const BeePay = {
         }
         m.textContent = "Memproses sandbox melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -763,7 +768,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa setiap sandbox run...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -902,7 +907,7 @@ const BeePay = {
         const eventFilter = document.getElementById("reconEventId")?.value.trim() || "";
         const statusFilter = document.getElementById("reconStatus")?.value || "";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1124,7 +1129,7 @@ const BeePay = {
         }
         m.textContent = "Memproses webhook melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1172,7 +1177,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan lifecycle webhook test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1208,7 +1213,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa provider runtime configuration...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1240,7 +1245,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Provider Configuration Boundary Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1273,7 +1278,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa payment channel routing...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1306,7 +1311,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Payment Channel Routing Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1339,7 +1344,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Payment Intent Lifecycle Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1375,7 +1380,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Missing Receipt Test 23.5.1...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1407,7 +1412,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Wrong Binding Test 23.5.1...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1441,7 +1446,7 @@ const BeePay = {
         let verified = false;
         m.textContent = "Menyiapkan concurrency specimen SANDBOX...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const postJson = async (body, label) => {
                 try {
                     const response = await fetch(config.API_URL, {
@@ -1536,7 +1541,7 @@ const BeePay = {
             // above are settled before this cleanup request is sent.
             if (specimen && !verified) {
                 try {
-                    const cleanupToken = await currentUser.getIdToken(true);
+                    const cleanupToken = await currentUser.getIdToken(false);
                     const cleanupResponse = await fetch(config.API_URL, {
                         method: "POST",
                         headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -1568,7 +1573,7 @@ const BeePay = {
         }
         m.textContent = "Menyiapkan mismatch concurrency specimen SANDBOX...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const prepResponse = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1670,7 +1675,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Recovery & Replay Test SANDBOX...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1703,7 +1708,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Reconciliation Integrity 23.5.1...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1736,7 +1741,7 @@ const BeePay = {
             return
         }
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1770,7 +1775,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Payment Receipt & Reconciliation Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1797,7 +1802,7 @@ const BeePay = {
             return
         }
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1825,7 +1830,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Universal Merchant & Upgrade Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1857,7 +1862,7 @@ const BeePay = {
             return
         }
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1885,7 +1890,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Merchant Registry & API Authentication Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1912,7 +1917,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Universal Merchant Payment API Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1943,7 +1948,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Provider Adapter Security Test...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2048,7 +2053,7 @@ const BeePay = {
             button.disabled = true;
         m.textContent = "Memvalidasi Checkout melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2120,7 +2125,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa binding Payment Intent → Transaction → Payment → Ticket...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2154,7 +2159,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan test idempotency Payment Intent...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2188,7 +2193,7 @@ const BeePay = {
         }
         m.textContent = "Membuat Sandbox Order melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2240,7 +2245,7 @@ const BeePay = {
         }
         m.textContent = "Membuat Payment Intent melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(true);
+            const idToken = await currentUser.getIdToken(false);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
