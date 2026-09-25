@@ -443,6 +443,34 @@
         "production",
         "source"
       ]
+    },
+    "payment_providers": {
+      "description": "Bank/PJP catalog for QRIS and bank transfer. No API secrets.",
+      "fields": {
+        "provider_id": "string",
+        "provider_name": "string",
+        "qris": "string",
+        "account_number": "string",
+        "account_name": "string",
+        "status": "ACTIVE|DISABLED",
+        "created_by": "string",
+        "created_at": "timestamp",
+        "updated_at": "timestamp"
+      }
+    },
+    "event_payment_providers": {
+      "description": "Many-to-many assignment of banks/PJPs to events.",
+      "fields": {
+        "assignment_id": "string",
+        "event_id": "string",
+        "provider_id": "string",
+        "method": "BOTH|QRIS|BANK_TRANSFER",
+        "priority": "integer",
+        "status": "ACTIVE|DISABLED",
+        "created_by": "string",
+        "created_at": "timestamp",
+        "updated_at": "timestamp"
+      }
     }
   },
   "payment_intent_lifecycle": [

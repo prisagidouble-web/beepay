@@ -1,6 +1,6 @@
 /* Phase 16 Firebase project: beepay-2c2dc. Config is kept in firebase-config.js. */
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
-import {getFirestore, collection, addDoc, getDocs, getDoc, doc, limit, query, orderBy, serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+import {getFirestore, collection, addDoc, getDocs, getDoc, doc, limit, query, orderBy, serverTimestamp, setDoc, updateDoc} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 import {getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 const config = window.BeePayConfig;
 let db = null
@@ -12,6 +12,7 @@ const BeePay = {
     async init() {
         document.getElementById("systemStatus").textContent = "Online";
         this.bindAuth();
+        this.bindBankEventManagement();
         this.bindIntent();
         this.bindCheckout();
         this.bindWebhook();
@@ -133,6 +134,8 @@ const BeePay = {
             document.getElementById("paymentProcessing").hidden = !yes;
             if (document.getElementById("sandboxOrderPanel"))
                 document.getElementById("sandboxOrderPanel").hidden = !yes;
+            if (document.getElementById("bankEventManagementPanel"))
+                document.getElementById("bankEventManagementPanel").hidden = !yes;
             if (document.getElementById("bindingHardeningPanel"))
                 document.getElementById("bindingHardeningPanel").hidden = !yes;
             if (document.getElementById("webhookLifecyclePanel"))
@@ -2373,6 +2376,136 @@ const BeePay = {
         } catch (e) {
             list.innerHTML = '<div class="intent-card">Payment intents belum dapat dibaca. Periksa Rules/index.</div>'
         }
+    },
+
+    bindBankEventManagement() {
+        document.getElementById("bankProviderForm")?.addEventListener("submit", async e => {
+            e.preventDefault(); await this.saveBankProvider();
+        });
+        document.getElementById("eventManagementForm")?.addEventListener("submit", async e => {
+            e.preventDefault(); await this.saveManagedEvent();
+        });
+        document.getElementById("eventBankAssignmentForm")?.addEventListener("submit", async e => {
+            e.preventDefault(); await this.saveEventBankAssignment();
+        });
+        if (db) {
+            this.loadBankProviders();
+            this.loadManagedEvents();
+        }
+    },
+    async assertSuperAdmin_() {
+        if (!currentUser) throw new Error("Silakan login terlebih dahulu.");
+        const snap = await getDoc(doc(db, "admin_users", currentUser.uid));
+        if (!snap.exists() || snap.data().active !== true || String(snap.data().role || "").toUpperCase() !== "SUPER_ADMIN")
+            throw new Error("Akses Bank & Event Management hanya untuk SUPER_ADMIN.");
+    },
+    async saveBankProvider() {
+        const m=document.getElementById("bankProviderMessage");
+        try {
+            await this.assertSuperAdmin_();
+            const id=document.getElementById("bankProviderId").value.trim().toUpperCase();
+            const name=document.getElementById("bankProviderName").value.trim();
+            const qris=document.getElementById("bankProviderQris").value.trim();
+            const account=document.getElementById("bankProviderAccountNumber").value.trim();
+            const accountName=document.getElementById("bankProviderAccountName").value.trim();
+            const status=document.getElementById("bankProviderStatus").value;
+            if(!/^[A-Z0-9][A-Z0-9._-]{2,63}$/.test(id)) throw new Error("Kode Bank/PJP tidak valid.");
+            if(!name) throw new Error("Nama Bank/PJP wajib.");
+            if(!qris && !account) throw new Error("Isi minimal QRIS atau Nomor Rekening.");
+            const ref=doc(db,"payment_providers",id), existing=await getDoc(ref);
+            const payload={provider_id:id,provider_name:name,qris,account_number:account,account_name:accountName,status,updated_by:currentUser.uid,updated_at:serverTimestamp()};
+            if(existing.exists()) await updateDoc(ref,payload);
+            else await setDoc(ref,{...payload,created_by:currentUser.uid,created_at:serverTimestamp()});
+            m.textContent=`Bank/PJP ${id} berhasil disimpan.`;
+            document.getElementById("bankProviderForm").reset();
+            document.getElementById("bankProviderStatus").value="ACTIVE";
+            this.invalidateReadCache("payment_providers");
+            await this.loadBankProviders();
+            await this.refreshAssignmentOptions();
+        } catch(e) { m.textContent="Gagal menyimpan Bank/PJP: "+e.message; }
+    },
+    async loadBankProviders() {
+        const list=document.getElementById("bankProviderList"); if(!db||!list) return;
+        try {
+            const s=await this.cachedGetDocs("payment_providers",()=>query(collection(db,"payment_providers"),orderBy("provider_name","asc"),limit(200)));
+            list.innerHTML=s.empty ? '<div class="intent-card">Belum ada Bank/PJP.</div>' :
+                s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.provider_name||x.provider_id||"-")}</h3><div class="meta">ID: ${this.escape(x.provider_id||"-")} · Rek: ${this.escape(x.account_number||"-")} · A/N: ${this.escape(x.account_name||"-")}</div><div class="meta">QRIS: ${this.escape(x.qris?"TERSEDIA":"BELUM DIISI")}</div></div><span class="status">${this.escape(x.status||"-")}</span></article>`}).join("");
+            await this.refreshAssignmentOptions();
+        } catch(e) { list.innerHTML='<div class="intent-card">Bank/PJP belum dapat dibaca. Periksa Security Rules.</div>'; }
+    },
+    async saveManagedEvent() {
+        const m=document.getElementById("eventManagementMessage");
+        try {
+            await this.assertSuperAdmin_();
+            const id=document.getElementById("managedEventId").value.trim().toUpperCase();
+            const name=document.getElementById("managedEventName").value.trim();
+            const date=document.getElementById("managedEventDate").value;
+            const venue=document.getElementById("managedEventVenue").value.trim();
+            const status=document.getElementById("managedEventStatus").value;
+            if(!/^[A-Z0-9][A-Z0-9._-]{2,63}$/.test(id)) throw new Error("Event ID tidak valid.");
+            if(!name) throw new Error("Nama Event wajib.");
+            const ref=doc(db,"events",id), existing=await getDoc(ref);
+            const payload={event_id:id,event_name:name,event_date:date||"",venue,status,updated_by:currentUser.uid,updated_at:serverTimestamp()};
+            if(existing.exists()) await updateDoc(ref,payload);
+            else await setDoc(ref,{...payload,created_by:currentUser.uid,created_at:serverTimestamp()});
+            m.textContent=`Event ${id} berhasil disimpan.`;
+            document.getElementById("eventManagementForm").reset();
+            document.getElementById("managedEventStatus").value="DRAFT";
+            this.invalidateReadCache("events");
+            await this.loadManagedEvents();
+            await this.refreshAssignmentOptions();
+        } catch(e) { m.textContent="Gagal menyimpan Event: "+e.message; }
+    },
+    async loadManagedEvents() {
+        const list=document.getElementById("eventManagementList"); if(!db||!list) return;
+        try {
+            const s=await this.cachedGetDocs("events",()=>query(collection(db,"events"),orderBy("event_name","asc"),limit(200)));
+            list.innerHTML=s.empty ? '<div class="intent-card">Belum ada Event.</div>' :
+                s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.event_name||x.event_id||"-")}</h3><div class="meta">ID: ${this.escape(x.event_id||"-")} · ${this.escape(x.event_date||"-")} · ${this.escape(x.venue||"-")}</div></div><span class="status">${this.escape(x.status||"-")}</span></article>`}).join("");
+            await this.refreshAssignmentOptions();
+        } catch(e) { list.innerHTML='<div class="intent-card">Event belum dapat dibaca. Periksa Security Rules.</div>'; }
+    },
+    async refreshAssignmentOptions() {
+        const es=document.getElementById("assignmentEventId"), bs=document.getElementById("assignmentBankId");
+        if(!db||!es||!bs) return;
+        try {
+            const [events,banks]=await Promise.all([
+                this.cachedGetDocs("events",()=>query(collection(db,"events"),orderBy("event_name","asc"),limit(200))),
+                this.cachedGetDocs("payment_providers",()=>query(collection(db,"payment_providers"),orderBy("provider_name","asc"),limit(200)))
+            ]);
+            es.innerHTML='<option value="">Pilih Event</option>'+events.docs.map(d=>{const x=d.data();return `<option value="${this.escape(x.event_id||d.id)}">${this.escape(x.event_name||x.event_id||d.id)}</option>`}).join("");
+            bs.innerHTML='<option value="">Pilih Bank/PJP</option>'+banks.docs.map(d=>{const x=d.data();return `<option value="${this.escape(x.provider_id||d.id)}">${this.escape(x.provider_name||x.provider_id||d.id)}</option>`}).join("");
+            await this.loadEventBankAssignments();
+        } catch(e) {}
+    },
+    async saveEventBankAssignment() {
+        const m=document.getElementById("eventBankAssignmentMessage");
+        try {
+            await this.assertSuperAdmin_();
+            const eventId=document.getElementById("assignmentEventId").value;
+            const providerId=document.getElementById("assignmentBankId").value;
+            const method=document.getElementById("assignmentMethod").value;
+            const priority=Number(document.getElementById("assignmentPriority").value||1);
+            const status=document.getElementById("assignmentStatus").value;
+            if(!eventId||!providerId) throw new Error("Event dan Bank/PJP wajib dipilih.");
+            if(!Number.isInteger(priority)||priority<1) throw new Error("Prioritas harus bilangan bulat >= 1.");
+            const id=`${eventId}__${providerId}`;
+            const ref=doc(db,"event_payment_providers",id), existing=await getDoc(ref);
+            const payload={assignment_id:id,event_id:eventId,provider_id:providerId,method,priority,status,updated_by:currentUser.uid,updated_at:serverTimestamp()};
+            if(existing.exists()) await updateDoc(ref,payload);
+            else await setDoc(ref,{...payload,created_by:currentUser.uid,created_at:serverTimestamp()});
+            m.textContent=`${providerId} terhubung ke ${eventId}.`;
+            this.invalidateReadCache("event_payment_providers");
+            await this.loadEventBankAssignments();
+        } catch(e) { m.textContent="Gagal menghubungkan Bank/PJP: "+e.message; }
+    },
+    async loadEventBankAssignments() {
+        const list=document.getElementById("eventBankAssignmentList"); if(!db||!list) return;
+        try {
+            const s=await this.cachedGetDocs("event_payment_providers",()=>query(collection(db,"event_payment_providers"),orderBy("event_id","asc"),limit(300)));
+            list.innerHTML=s.empty ? '<div class="intent-card">Belum ada hubungan Bank ↔ Event.</div>' :
+                s.docs.map(d=>{const x=d.data();return `<article class="intent-card"><div><h3>${this.escape(x.event_id||"-")} → ${this.escape(x.provider_id||"-")}</h3><div class="meta">${this.escape(x.method||"-")} · Priority ${this.escape(String(x.priority||1))}</div></div><span class="status">${this.escape(x.status||"-")}</span></article>`}).join("");
+        } catch(e) { list.innerHTML='<div class="intent-card">Mapping Bank ↔ Event belum dapat dibaca. Periksa Security Rules.</div>'; }
     },
     escape(v) {
         return String(v).replace(/[&<>"']/g, c => ({

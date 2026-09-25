@@ -24,6 +24,53 @@
 <div id="moduleSearchResults" class="module-search-results" aria-live="polite"></div>
 </section>
 <section class="system-status"><div class="status-card"><span class="status-label">System</span><span id="systemStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">API</span><span id="apiStatus" class="status-value">Checking...</span></div><div class="status-card"><span class="status-label">Firebase</span><span id="firebaseStatus" class="status-value">Checking...</span></div></section>
+
+<section id="bankEventManagementPanel" class="panel" hidden>
+<div class="section-heading">
+<h2>Bank &amp; Event Management</h2>
+<p>BeePay dapat menyimpan banyak bank/PJP dan banyak event. Setiap bank memiliki QRIS dan/atau nomor rekening. Bank dapat dipakai pada banyak event.</p>
+</div>
+
+<div class="section-heading"><h3>Tambah / Perbarui Bank</h3></div>
+<form id="bankProviderForm" class="form-grid">
+<input id="bankProviderId" required maxlength="64" placeholder="Kode Bank/PJP, contoh: BANK-BCA">
+<input id="bankProviderName" required maxlength="120" placeholder="Nama Bank/PJP">
+<input id="bankProviderQris" maxlength="500" placeholder="QRIS / QRIS payload / URL gambar">
+<input id="bankProviderAccountNumber" maxlength="64" placeholder="Nomor Rekening">
+<input id="bankProviderAccountName" maxlength="120" placeholder="Nama Pemilik Rekening">
+<select id="bankProviderStatus"><option value="ACTIVE">ACTIVE</option><option value="DISABLED">DISABLED</option></select>
+<button type="submit">Simpan Bank</button>
+</form>
+<div id="bankProviderMessage" class="message"></div>
+<div id="bankProviderList" class="list"></div>
+
+<hr>
+<div class="section-heading"><h3>Tambah / Perbarui Event</h3></div>
+<form id="eventManagementForm" class="form-grid">
+<input id="managedEventId" required maxlength="64" placeholder="Event ID, contoh: EVENT-KUPANG-2026">
+<input id="managedEventName" required maxlength="160" placeholder="Nama Event">
+<input id="managedEventDate" type="date" placeholder="Tanggal Event">
+<input id="managedEventVenue" maxlength="160" placeholder="Lokasi / Venue">
+<select id="managedEventStatus"><option value="DRAFT">DRAFT</option><option value="ACTIVE">ACTIVE</option><option value="CLOSED">CLOSED</option></select>
+<button type="submit">Simpan Event</button>
+</form>
+<div id="eventManagementMessage" class="message"></div>
+<div id="eventManagementList" class="list"></div>
+
+<hr>
+<div class="section-heading"><h3>Hubungkan Bank ke Event</h3>
+<p>Satu event dapat menggunakan banyak bank. Satu bank juga dapat digunakan pada banyak event.</p></div>
+<form id="eventBankAssignmentForm" class="form-grid">
+<select id="assignmentEventId" required><option value="">Pilih Event</option></select>
+<select id="assignmentBankId" required><option value="">Pilih Bank/PJP</option></select>
+<select id="assignmentMethod"><option value="BOTH">QRIS + TRANSFER BANK</option><option value="QRIS">QRIS</option><option value="BANK_TRANSFER">TRANSFER BANK</option></select>
+<input id="assignmentPriority" type="number" min="1" max="999" value="1" placeholder="Prioritas">
+<select id="assignmentStatus"><option value="ACTIVE">ACTIVE</option><option value="DISABLED">DISABLED</option></select>
+<button type="submit">Hubungkan Bank ke Event</button>
+</form>
+<div id="eventBankAssignmentMessage" class="message"></div>
+<div id="eventBankAssignmentList" class="list"></div>
+</section>
 <section id="sandboxOrderPanel" class="panel" hidden>
 <div class="section-heading"><h2>Sandbox Order Fixture</h2><p>Membuat order khusus SANDBOX melalui trusted backend agar dapat dipakai untuk test Payment Intent. Tidak membuat order production.</p></div>
 <div class="form-grid">

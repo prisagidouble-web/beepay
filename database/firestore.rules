@@ -51,6 +51,21 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+
+    // Bank/PJP display catalog only. Never store API secrets here.
+    match /payment_providers/{providerId} {
+      allow read: if signedIn() &&
+        hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR', 'SUPPORT']);
+      allow create, update, delete: if isRole('SUPER_ADMIN');
+    }
+
+    // Many-to-many Bank/PJP <-> Event assignment.
+    match /event_payment_providers/{assignmentId} {
+      allow read: if signedIn() &&
+        hasAnyRole(['SUPER_ADMIN', 'FINANCE', 'EVENT_ADMIN', 'AUDITOR', 'SUPPORT']);
+      allow create, update, delete: if isRole('SUPER_ADMIN');
+    }
+
     // Events.
     match /events/{eventId} {
       allow read: if signedIn();
