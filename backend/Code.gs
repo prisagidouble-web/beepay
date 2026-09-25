@@ -24,7 +24,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.14";
+const BEEPAY_VERSION = "23.5.15";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -2858,17 +2858,6 @@ function processSandboxWebhook(body, trustedAuthUser) {
     throw new Error("Currency webhook harus IDR.");
   }
 
-  const intentDoc = getDocument("payment_intents", paymentIntentId);
-  if (!intentDoc || !intentDoc.fields) {
-    throw new Error("Payment Intent tidak ditemukan: " + paymentIntentId);
-  }
-  const intent = decodeFirestoreFields(intentDoc.fields || {});
-  if (intent.production !== false || intent.trusted !== true || intent.created_by_backend !== true) {
-    throw new Error("Payment Intent bukan intent sandbox trusted backend.");
-  }
-  if (Number(intent.amount) !== amount) throw new Error("Nominal webhook tidak sesuai Payment Intent.");
-  if (String(intent.currency || "IDR").toUpperCase() !== "IDR") throw new Error("Currency Payment Intent harus IDR.");
-
   const expectedEventType = targetStatus === "PROCESSING"
     ? "PAYMENT_PROCESSING"
     : targetStatus === "SUCCEEDED"
@@ -2878,14 +2867,22 @@ function processSandboxWebhook(body, trustedAuthUser) {
     throw new Error("Event Type tidak sesuai dengan Target Status.");
   }
 
+  // SECURITY HARDENING (23.5.15):
+  // Reject and ledger invalid-signature webhooks before reading payment state.
+  // This keeps authentication failures cheap under burst traffic and ensures
+  // the shared invalid-signature event is recorded exactly once. No payment
+  // state is touched by this branch.
   const webhookId = "WH-SBX-" + providerEventId;
   const existingWebhook = getDocument("webhooks", webhookId);
   if (existingWebhook && existingWebhook.fields) {
     const existingData = decodeFirestoreFields(existingWebhook.fields || {});
     return {
-      success: true,
+      success: String(existingData.status || "").toUpperCase() === "REJECTED"
+        ? false
+        : true,
       existing: true,
       idempotent: true,
+      rejected: String(existingData.status || "").toUpperCase() === "REJECTED",
       environment: "SANDBOX",
       production: false,
       webhookId: webhookId,
@@ -2894,6 +2891,7 @@ function processSandboxWebhook(body, trustedAuthUser) {
       targetStatus: String(existingData.target_status || targetStatus),
       processingStatus: String(existingData.status || "PROCESSED"),
       processingResult: String(existingData.processing_result || "Webhook sudah diproses sebelumnya."),
+      reason: String(existingData.processing_result || ""),
       message: "Duplicate webhook diterima secara idempotent. Tidak ada perubahan state tambahan.",
       timestamp: new Date().toISOString()
     };
@@ -2901,6 +2899,7 @@ function processSandboxWebhook(body, trustedAuthUser) {
 
   // Invalid signature/authentication is recorded as REJECTED, but it can never
   // mutate the Payment Intent, Transaction, Payment, Ledger, or Ticket.
+  // IMPORTANT: this branch intentionally runs before the Payment Intent lookup.
   if (!signatureValid) {
     createDocument("webhooks", webhookId, {
       webhook_id: str(webhookId),
@@ -2932,6 +2931,17 @@ function processSandboxWebhook(body, trustedAuthUser) {
       timestamp: new Date().toISOString()
     };
   }
+
+  const intentDoc = getDocument("payment_intents", paymentIntentId);
+  if (!intentDoc || !intentDoc.fields) {
+    throw new Error("Payment Intent tidak ditemukan: " + paymentIntentId);
+  }
+  const intent = decodeFirestoreFields(intentDoc.fields || {});
+  if (intent.production !== false || intent.trusted !== true || intent.created_by_backend !== true) {
+    throw new Error("Payment Intent bukan intent sandbox trusted backend.");
+  }
+  if (Number(intent.amount) !== amount) throw new Error("Nominal webhook tidak sesuai Payment Intent.");
+  if (String(intent.currency || "IDR").toUpperCase() !== "IDR") throw new Error("Currency Payment Intent harus IDR.");
 
   // A provider reference must not be reused by a different event.
   const referenceCandidates = queryCollectionByField_("webhooks", "reference", providerReference, 20);
