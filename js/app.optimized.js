@@ -1983,56 +1983,74 @@ const BeePay = {
     },
     async createWebhookLedger() {
         const m = document.getElementById("webhookMessage");
-        if (!db || !currentUser) {
+        if (!auth || !currentUser) {
             m.textContent = "Login terlebih dahulu.";
             return
         }
-        const provider = document.getElementById("webhookProvider").value.trim()
-          , eventType = document.getElementById("webhookEventType").value.trim()
-          , reference = document.getElementById("webhookReference").value.trim()
-          , payloadHash = document.getElementById("webhookPayloadHash").value.trim();
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
+            m.textContent = "API Apps Script belum dikonfigurasi.";
+            return
+        }
+        const provider = document.getElementById("webhookProvider").value.trim();
+        const eventType = document.getElementById("webhookEventType").value.trim();
+        const reference = document.getElementById("webhookReference").value.trim();
+        const payloadHash = document.getElementById("webhookPayloadHash").value.trim();
+        const status = document.getElementById("webhookStatus").value;
         if (!provider || !eventType || !reference || !payloadHash) {
             m.textContent = "Semua field webhook wajib diisi.";
             return
         }
-        const id = `WH-${Date.now()}`
-          , data = {
-            webhook_id: id,
-            provider,
-            event_type: eventType,
-            reference,
-            payload_hash: payloadHash,
-            status: document.getElementById("webhookStatus").value,
-            received_at: serverTimestamp(),
-            created_by: currentUser.uid
-        };
+        m.textContent = "Mencatat webhook melalui trusted backend...";
         try {
-            await addDoc(collection(db, "webhooks"), data);
+            const idToken = await currentUser.getIdToken(true);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({
+                    action: "create_webhook_event",
+                    idToken,
+                    provider,
+                    eventType,
+                    providerReference: reference,
+                    payloadHash,
+                    status
+                })
+            });
+            const result = await response.json();
+            if (!result.success) throw new Error(result.error || "Gagal mencatat webhook.");
             document.getElementById("webhookForm").reset();
-            this.invalidateReadCache("webhooks");
-            m.textContent = `Webhook ${id} dicatat. Ini belum memvalidasi pembayaran.`;
-            await this.loadWebhooks()
+            m.textContent = result.message || `Webhook ${result.webhookId || "-"} dicatat oleh trusted backend.`;
+            await this.loadWebhooks();
         } catch (e) {
-            m.textContent = "Gagal mencatat webhook: " + e.message
+            console.error("Webhook ledger backend:", e);
+            m.textContent = "Gagal mencatat webhook: " + (e.message || e)
         }
     },
     async loadWebhooks() {
         const list = document.getElementById("webhookList");
-        if (!db || !list)
-            return;
+        if (!auth || !currentUser || !list) return;
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
+            list.innerHTML = '<div class="intent-card">API Apps Script belum dikonfigurasi.</div>';
+            return
+        }
         try {
-            const s = await this.cachedGetDocs("webhooks", () => query(collection(db, "webhooks"), orderBy("received_at", "desc"), limit(20)));
-            if (s.empty) {
+            const idToken = await currentUser.getIdToken(true);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({action: "list_webhook_events", idToken, limit: 20})
+            });
+            const result = await response.json();
+            if (!result.success) throw new Error(result.error || "Webhook ledger gagal dibaca.");
+            const rows = Array.isArray(result.rows) ? result.rows : [];
+            if (!rows.length) {
                 list.innerHTML = '<div class="intent-card">Belum ada webhook event.</div>';
                 return
             }
-            list.innerHTML = s.docs.map(d => {
-                const x = d.data();
-                return `<article class="intent-card"><div><h3>${this.escape(x.webhook_id || "-")}</h3><div class="meta">${this.escape(x.provider || "-")} · ${this.escape(x.event_type || "-")} · Ref: ${this.escape(x.reference || "-")}</div></div><span class="status">${this.escape(x.status || "-")}</span></article>`
-            }
-            ).join("")
+            list.innerHTML = rows.map(x => `<article class="intent-card"><div><h3>${this.escape(x.webhook_id || "-")}</h3><div class="meta">${this.escape(x.provider || "-")} · ${this.escape(x.event_type || "-")} · Ref: ${this.escape(x.reference || "-")}</div></div><span class="status">${this.escape(x.status || "-")}</span></article>`).join("");
         } catch (e) {
-            list.innerHTML = '<div class="intent-card">Webhook ledger belum dapat dibaca.</div>'
+            console.error("Webhook ledger backend read:", e);
+            list.innerHTML = '<div class="intent-card">Webhook ledger gagal dibaca: ' + this.escape(e.message || "Unknown error") + '</div>'
         }
     },
     async createCheckout() {
