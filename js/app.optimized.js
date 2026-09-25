@@ -969,39 +969,50 @@ const BeePay = {
     },
     async createTicketRecord() {
         const m = document.getElementById("ticketMessage");
-        if (!db || !currentUser) {
+        if (!currentUser) {
             m.textContent = "Login terlebih dahulu.";
-            return
+            return;
         }
-        const orderId = document.getElementById("ticketOrderId").value.trim()
-          , transactionId = document.getElementById("ticketTransactionId").value.trim()
-          , userId = document.getElementById("ticketUserId").value.trim()
-          , eventId = document.getElementById("ticketEventId").value.trim();
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
+            m.textContent = "API Apps Script belum dikonfigurasi.";
+            return;
+        }
+        const orderId = document.getElementById("ticketOrderId").value.trim();
+        const transactionId = document.getElementById("ticketTransactionId").value.trim();
+        const userId = document.getElementById("ticketUserId").value.trim();
+        const eventId = document.getElementById("ticketEventId").value.trim();
+        const status = document.getElementById("ticketStatus").value;
         if (!orderId || !transactionId || !userId || !eventId) {
             m.textContent = "Order, Transaction, User dan Event wajib diisi.";
-            return
+            return;
         }
-        const id = `TKT-${Date.now()}`
-          , data = {
-            ticket_id: id,
-            order_id: orderId,
-            transaction_id: transactionId,
-            user_id: userId,
-            event_id: eventId,
-            status: document.getElementById("ticketStatus").value,
-            active: false,
-            activated_by_backend: false,
-            created_by: currentUser.uid,
-            created_at: serverTimestamp()
-        };
+        m.textContent = "Mencatat ticket ledger melalui trusted backend...";
         try {
-            await addDoc(collection(db, "tickets"), data);
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({
+                    action: "create_ticket_record",
+                    idToken,
+                    orderId,
+                    transactionId,
+                    userId,
+                    eventId,
+                    status
+                }),
+                cache: "no-store"
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || result.message || "Gagal mencatat ticket.");
+            }
             document.getElementById("ticketForm").reset();
             this.invalidateReadCache("tickets");
-            m.textContent = `Ticket ${id} dicatat. Belum aktif karena belum ada trusted payment success.`;
-            await this.loadTickets()
+            m.textContent = `Ticket ${result.ticketId} dicatat oleh trusted backend. Ticket belum aktif.`;
+            await this.loadTickets();
         } catch (e) {
-            m.textContent = "Gagal mencatat ticket: " + e.message
+            m.textContent = "Gagal mencatat ticket: " + e.message;
         }
     },
     async loadTickets() {
