@@ -15,6 +15,7 @@
  * Phase 23.5.2 adds high-traffic read hardening and bounded reconciliation lookups.
  * Phase 23.5.7 fixes provider-adapter diagnostic timing and hardens client auth/read behavior for burst traffic.
  * Phase 23.5.13 routes Payment Result, Verification, and Ticket Ledger writes through trusted backend.
+ * Phase 23.5.14 routes Webhook Event Ledger writes/reads through trusted backend.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -23,7 +24,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.13";
+const BEEPAY_VERSION = "23.5.14";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -240,6 +241,14 @@ function doPost(e) {
       return jsonResponse(withScriptLock(function() {
         return processCreateVerificationRecord(body);
       }));
+    }
+    if (body.action === "create_webhook_event") {
+      return jsonResponse(withScriptLock(function() {
+        return processCreateWebhookEvent(body);
+      }));
+    }
+    if (body.action === "list_webhook_events") {
+      return jsonResponse(processListWebhookEvents(body));
     }
     return jsonResponse({
       success: false,
@@ -4332,6 +4341,98 @@ function processCreateVerificationRecord(body) {
     actorUid: authUser.uid,
     role: String(admin.role || ""),
     message: "Verification dicatat oleh trusted backend. Status pembayaran tidak diubah."
+  };
+}
+
+/**
+ * Trusted Webhook Event Ledger writer.
+ * This is a QA/audit ledger only. It does not process payment state,
+ * activate tickets, or call a live bank/PJP.
+ */
+function processCreateWebhookEvent(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun admin tidak aktif atau tidak ditemukan.");
+  if (BEEPAY_ROLES.indexOf(String(admin.role || "").toUpperCase()) === -1) {
+    throw new Error("Role admin tidak dikenali.");
+  }
+
+  const provider = String(body.provider || "").trim();
+  const eventType = String(body.eventType || "").trim();
+  const providerReference = String(body.providerReference || "").trim();
+  const payloadHash = String(body.payloadHash || "").trim();
+  const status = String(body.status || "RECEIVED").trim().toUpperCase();
+
+  if (!provider || provider.length > 200) throw new Error("Provider / Bank wajib diisi dan maksimal 200 karakter.");
+  if (!eventType || eventType.length > 200) throw new Error("Event Type wajib diisi dan maksimal 200 karakter.");
+  if (!providerReference || providerReference.length > 200) throw new Error("Provider Reference wajib diisi dan maksimal 200 karakter.");
+  if (!payloadHash || payloadHash.length > 500) throw new Error("Payload Hash wajib diisi dan maksimal 500 karakter.");
+  if (["RECEIVED", "REJECTED"].indexOf(status) === -1) throw new Error("Webhook status hanya RECEIVED atau REJECTED.");
+
+  const now = new Date().toISOString();
+  const webhookId = "WH-LDG-" + new Date().getTime() + "-" + Utilities.getUuid().slice(0,8);
+  createDocument("webhooks", webhookId, {
+    webhook_id: str(webhookId),
+    provider: str(provider),
+    event_type: str(eventType),
+    reference: str(providerReference),
+    payload_hash: str(payloadHash),
+    status: str(status),
+    received_at: timestamp(now),
+    created_at: timestamp(now),
+    updated_at: timestamp(now),
+    created_by: str(authUser.uid),
+    created_by_backend: boolean(true),
+    trusted: boolean(true),
+    production: boolean(false),
+    bank_called: boolean(false),
+    source: str("trusted-backend-webhook-ledger")
+  });
+
+  return {
+    success: true,
+    webhookId: webhookId,
+    provider: provider,
+    eventType: eventType,
+    providerReference: providerReference,
+    status: status,
+    trusted: true,
+    production: false,
+    liveBankCalled: false,
+    actorUid: authUser.uid,
+    role: String(admin.role || ""),
+    message: "Webhook event dicatat oleh trusted backend. Event ledger tidak memproses atau mengubah status pembayaran."
+  };
+}
+
+/**
+ * Trusted Webhook Event Ledger reader. Browser never reads the Firestore
+ * collection directly; the backend performs the bounded admin read.
+ */
+function processListWebhookEvents(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun admin tidak aktif atau tidak ditemukan.");
+  if (BEEPAY_ROLES.indexOf(String(admin.role || "").toUpperCase()) === -1) {
+    throw new Error("Role admin tidak dikenali.");
+  }
+
+  const limit = Math.min(50, Math.max(1, Number(body.limit || 20)));
+  const docs = listDocuments("webhooks", limit + 20).sort(function(a, b) {
+    const at = Date.parse(String(a.data && (a.data.created_at || a.data.received_at) || "")) || 0;
+    const bt = Date.parse(String(b.data && (b.data.created_at || b.data.received_at) || "")) || 0;
+    return bt - at;
+  }).slice(0, limit);
+
+  return {
+    success: true,
+    trusted: true,
+    production: false,
+    liveBankCalled: false,
+    rows: docs.map(function(x) { return x.data || {}; }),
+    message: "Webhook ledger dibaca oleh trusted backend."
   };
 }
 
