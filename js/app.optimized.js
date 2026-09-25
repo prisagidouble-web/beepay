@@ -38,6 +38,8 @@ const BeePay = {
         this.bindConcurrencyTest();
         this.bindMismatchConcurrencyTest();
         this.bindRecoveryReplayTest();
+        this.bindRateLimit();
+        this.bindHighTrafficListenerSafety();
         this.bindFinalRegressionTests();
         this.bindHealth();
         this.bindFinalAudit();
@@ -361,6 +363,12 @@ const BeePay = {
     },
     bindProviderAdapter() {
         document.getElementById("providerAdapterTestBtn")?.addEventListener("click", () => this.runProviderAdapterTest())
+    },
+    bindRateLimit() {
+        document.getElementById("rateLimitTestBtn")?.addEventListener("click", () => this.runRateLimitTest());
+    },
+    bindHighTrafficListenerSafety() {
+        document.getElementById("highTrafficListenerSafetyTestBtn")?.addEventListener("click", () => this.runHighTrafficListenerSafetyTest());
     },
     bindProviderConfig() {
         document.getElementById("providerConfigStatusBtn")?.addEventListener("click", () => this.loadProviderConfigStatus());
@@ -1944,6 +1952,46 @@ const BeePay = {
             console.error(e);
             m.textContent = "Universal Merchant Payment API Test gagal: " + e.message
         }
+    },
+    async runRateLimitTest() {
+        const m = document.getElementById("rateLimitTestMessage");
+        if (!m) return;
+        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
+        m.textContent = "Menjalankan Rate Limit & Abuse Protection Test...";
+        try {
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {
+                method:"POST",
+                headers:{"Content-Type":"text/plain;charset=utf-8"},
+                body:JSON.stringify({action:"sandbox_rate_limit_test",idToken}),
+                cache:"no-store"
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error(result.error || "Rate Limit & Abuse Protection Test gagal.");
+            const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
+            m.textContent=`Rate Limit & Abuse Protection ${result.overall || "FAIL"}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
+        } catch(e) { console.error(e); m.textContent="Rate Limit / Abuse Protection Test gagal: "+(e.message||e); }
+    },
+    async runHighTrafficListenerSafetyTest() {
+        const m = document.getElementById("highTrafficListenerSafetyTestMessage");
+        if (!m) return;
+        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
+        m.textContent = "Menjalankan High-Traffic / Listener Safety Test...";
+        try {
+            const idToken = await currentUser.getIdToken(false);
+            const response = await fetch(config.API_URL, {
+                method:"POST",
+                headers:{"Content-Type":"text/plain;charset=utf-8"},
+                body:JSON.stringify({action:"sandbox_high_traffic_listener_safety_test",idToken}),
+                cache:"no-store"
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error(result.error || "High-Traffic / Listener Safety Test gagal.");
+            const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
+            m.textContent=`High-Traffic / Listener Safety ${result.overall || "FAIL"}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
+        } catch(e) { console.error(e); m.textContent="High-Traffic / Listener Safety Test gagal: "+(e.message||e); }
     },
     async runProviderAdapterTest() {
         const m = document.getElementById("providerAdapterTestMessage");
