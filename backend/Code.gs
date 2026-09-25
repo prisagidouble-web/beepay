@@ -14,6 +14,7 @@
  * Phase 23.5.1 adds Recovery & Replay final sandbox verification.
  * Phase 23.5.2 adds high-traffic read hardening and bounded reconciliation lookups.
  * Phase 23.5.7 fixes provider-adapter diagnostic timing and hardens client auth/read behavior for burst traffic.
+ * Phase 23.5.13 routes Payment Result, Verification, and Ticket Ledger writes through trusted backend.
  *
  * IMPORTANT:
  * - This endpoint is SANDBOX ONLY.
@@ -22,7 +23,7 @@
  * - GAS verifies the Firebase token and checks admin_users/{uid}.
  * - GAS writes trusted payment/ticket records using its Google OAuth identity.
  */
-const BEEPAY_VERSION = "23.5.12";
+const BEEPAY_VERSION = "23.5.13";
 const FIREBASE_PROJECT_ID = "beepay-2c2dc";
 const FIREBASE_API_KEY = "AIzaSyBvlpAPvhG2uFMLaY2wXI2tzvLduvISlks";
 const DB_ROOT = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -228,6 +229,16 @@ function doPost(e) {
     if (body.action === "create_ticket_record") {
       return jsonResponse(withScriptLock(function() {
         return processCreateTicketRecord(body);
+      }));
+    }
+    if (body.action === "create_payment_result") {
+      return jsonResponse(withScriptLock(function() {
+        return processCreatePaymentResult(body);
+      }));
+    }
+    if (body.action === "create_verification_record") {
+      return jsonResponse(withScriptLock(function() {
+        return processCreateVerificationRecord(body);
       }));
     }
     return jsonResponse({
@@ -4183,6 +4194,144 @@ function processCreateTicketRecord(body) {
     actorUid: authUser.uid,
     role: String(admin.role || ""),
     message: "Ticket ledger dicatat oleh trusted backend. Ticket belum aktif."
+  };
+}
+
+
+/**
+ * Trusted Payment Result Ledger writer.
+ * Browser never writes payment_results directly.
+ * This is QA/audit only and can never create trusted payment success.
+ */
+function processCreatePaymentResult(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun admin tidak aktif atau tidak ditemukan.");
+  if (BEEPAY_ROLES.indexOf(String(admin.role || "").toUpperCase()) === -1) {
+    throw new Error("Role admin tidak dikenali.");
+  }
+
+  const paymentIntentId = String(body.paymentIntentId || "").trim();
+  const transactionId = String(body.transactionId || "").trim();
+  const status = String(body.status || "PROCESSING").trim().toUpperCase();
+  const providerReference = String(body.providerReference || "").trim();
+
+  if (!paymentIntentId || paymentIntentId.length > 200) {
+    throw new Error("Payment Intent ID wajib diisi dan maksimal 200 karakter.");
+  }
+  if (!transactionId || transactionId.length > 200) {
+    throw new Error("Transaction ID wajib diisi dan maksimal 200 karakter.");
+  }
+  if (["PROCESSING", "FAILED", "EXPIRED"].indexOf(status) === -1) {
+    throw new Error("Payment Result Ledger hanya mengizinkan PROCESSING, FAILED, atau EXPIRED.");
+  }
+  if (providerReference.length > 200) {
+    throw new Error("Provider Reference maksimal 200 karakter.");
+  }
+
+  const now = new Date().toISOString();
+  const resultId = "PR-" + new Date().getTime() + "-" + Utilities.getUuid().slice(0,8);
+
+  createDocument("payment_results", resultId, {
+    payment_result_id: str(resultId),
+    payment_intent_id: str(paymentIntentId),
+    transaction_id: str(transactionId),
+    status: str(status),
+    provider_reference: str(providerReference || ""),
+    trusted: boolean(false),
+    processed_by_backend: boolean(true),
+    created_by: str(authUser.uid),
+    production: boolean(false),
+    bank_called: boolean(false),
+    source: str("trusted-backend-payment-result-ledger"),
+    created_at: timestamp(now),
+    updated_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    paymentResultId: resultId,
+    paymentIntentId: paymentIntentId,
+    transactionId: transactionId,
+    status: status,
+    providerReference: providerReference || null,
+    trusted: false,
+    processedByBackend: true,
+    production: false,
+    liveBankCalled: false,
+    actorUid: authUser.uid,
+    role: String(admin.role || ""),
+    message: "Payment Result dicatat oleh trusted backend. Trusted payment success tidak diubah dari ledger QA."
+  };
+}
+
+/**
+ * Trusted Verification Ledger writer.
+ * Browser never writes verification_ledger directly.
+ * Recording MATCH_PENDING_TRUSTED is only a QA observation; it never changes
+ * a Payment Intent, Transaction, Payment, or Ticket into a trusted success.
+ */
+function processCreateVerificationRecord(body) {
+  if (!body.idToken) throw new Error("Firebase ID token wajib.");
+  const authUser = verifyFirebaseIdToken(body.idToken);
+  const admin = getAdminProfile(authUser.uid);
+  if (!admin || admin.active !== true) throw new Error("Akun admin tidak aktif atau tidak ditemukan.");
+  if (BEEPAY_ROLES.indexOf(String(admin.role || "").toUpperCase()) === -1) {
+    throw new Error("Role admin tidak dikenali.");
+  }
+
+  const paymentIntentId = String(body.paymentIntentId || "").trim();
+  const providerReference = String(body.providerReference || "").trim();
+  const amount = Number(body.amount);
+  const result = String(body.result || "").trim().toUpperCase();
+
+  if (!paymentIntentId || paymentIntentId.length > 200) {
+    throw new Error("Payment Intent ID wajib diisi dan maksimal 200 karakter.");
+  }
+  if (!providerReference || providerReference.length > 200) {
+    throw new Error("Provider Reference wajib diisi dan maksimal 200 karakter.");
+  }
+  if (!Number.isSafeInteger(amount) || amount < 1) {
+    throw new Error("Amount harus berupa bilangan bulat positif yang valid.");
+  }
+  if (["MATCH_PENDING_TRUSTED", "MISMATCH", "DUPLICATE"].indexOf(result) === -1) {
+    throw new Error("Verification Result tidak valid.");
+  }
+
+  const now = new Date().toISOString();
+  const verificationId = "VR-" + new Date().getTime() + "-" + Utilities.getUuid().slice(0,8);
+
+  createDocument("verification_ledger", verificationId, {
+    verification_id: str(verificationId),
+    payment_intent_id: str(paymentIntentId),
+    provider_reference: str(providerReference),
+    observed_amount: integer(amount),
+    result: str(result),
+    verified: boolean(false),
+    verified_by_backend: boolean(true),
+    created_by: str(authUser.uid),
+    production: boolean(false),
+    bank_called: boolean(false),
+    source: str("trusted-backend-verification-ledger"),
+    created_at: timestamp(now),
+    updated_at: timestamp(now)
+  });
+
+  return {
+    success: true,
+    verificationId: verificationId,
+    paymentIntentId: paymentIntentId,
+    providerReference: providerReference,
+    observedAmount: amount,
+    result: result,
+    verified: false,
+    verifiedByBackend: true,
+    production: false,
+    liveBankCalled: false,
+    actorUid: authUser.uid,
+    role: String(admin.role || ""),
+    message: "Verification dicatat oleh trusted backend. Status pembayaran tidak diubah."
   };
 }
 
