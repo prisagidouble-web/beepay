@@ -8,7 +8,7 @@ let db = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
 const BeePay = {
-    version: "23.5.13",
+    version: "23.5.15",
     async init() {
         document.getElementById("systemStatus").textContent = "Online";
         this.bindAuth();

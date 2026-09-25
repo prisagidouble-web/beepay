@@ -36,7 +36,7 @@ async function parseJsonResponseSafe(response, label) {
     }
 }
 const BeePay = {
-    version: "23.5.9",
+    version: "23.5.15",
     init() {
         // Global singleton guard: protects against duplicate module/script loading.
         if (window.__BeePayInitPromise)
