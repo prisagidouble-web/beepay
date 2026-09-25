@@ -7,41 +7,9 @@ let db = null
   , auth = null
   , currentUser = null;
 const READ_CACHE_TTL_MS = 15000;
-const READ_INFLIGHT_MAX_MS = 30000;
-
-async function parseJsonResponseSafe(response, label) {
-    const contentType = String(response.headers?.get("content-type") || "").toLowerCase();
-    const raw = await response.text();
-    if (!raw) {
-        return {
-            success: false,
-            error: `${label}: respons kosong`,
-            httpStatus: response.status,
-            contentType
-        };
-    }
-    try {
-        const data = JSON.parse(raw);
-        return data && typeof data === "object"
-            ? data
-            : { success: false, error: `${label}: response JSON bukan object`, httpStatus: response.status, contentType };
-    } catch (error) {
-        return {
-            success: false,
-            error: `${label}: response bukan JSON (HTTP ${response.status}, ${contentType || "content-type tidak diketahui"})`,
-            httpStatus: response.status,
-            contentType,
-            responsePreview: raw.slice(0, 240)
-        };
-    }
-}
 const BeePay = {
-    version: "23.5.9",
-    init() {
-        // Global singleton guard: protects against duplicate module/script loading.
-        if (window.__BeePayInitPromise)
-            return window.__BeePayInitPromise;
-        const run = async () => {
+    version: "23.5.13",
+    async init() {
         document.getElementById("systemStatus").textContent = "Online";
         this.bindAuth();
         this.bindIntent();
@@ -49,9 +17,6 @@ const BeePay = {
         this.bindWebhook();
         this.bindWebhookSimulation();
         this.bindProviderAdapter();
-        this.bindSecurityRbac();
-        this.bindHighTrafficListenerSafety();
-        this.bindRateLimit();
         this.bindProviderConfig();
         this.bindPaymentRouting();
         this.bindPaymentReconciliation();
@@ -76,12 +41,8 @@ const BeePay = {
         this.bindFinalRegressionTests();
         this.bindHealth();
         this.bindFinalAudit();
-        this.bindModuleSearch();
         await this.checkAPI();
-        await this.initFirebase();
-        };
-        window.__BeePayInitPromise = run();
-        return window.__BeePayInitPromise;
+        await this.initFirebase()
     },
     async checkAPI() {
         const e = document.getElementById("apiStatus");
@@ -100,8 +61,6 @@ const BeePay = {
     },
     async initFirebase() {
         const e = document.getElementById("firebaseStatus");
-        if (window.__BeePayFirebaseReady)
-            return;
         if (!config?.FIREBASE?.projectId || config.FIREBASE.projectId.startsWith("YOUR_")) {
             e.textContent = "Not Configured";
             return
@@ -110,7 +69,6 @@ const BeePay = {
             initializeApp(config.FIREBASE);
             db = getFirestore();
             auth = getAuth();
-            window.__BeePayFirebaseReady = true;
             e.textContent = "Connected";
             this.watchAuth()
         } catch (x) {
@@ -141,11 +99,7 @@ const BeePay = {
         const pending = this.readInflight.get(key);
         if (pending)
             return pending;
-        const readPromise = getDocs(queryFactory());
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Firestore read timeout")), READ_INFLIGHT_MAX_MS)
-        );
-        const promise = Promise.race([readPromise, timeoutPromise]).then(snapshot => {
+        const promise = getDocs(queryFactory()).then(snapshot => {
             this.readCache.set(key, {at: Date.now(), snapshot});
             return snapshot;
         }).finally(() => {
@@ -167,9 +121,7 @@ const BeePay = {
         document.getElementById("logoutButton")?.addEventListener("click", () => this.logout())
     },
     watchAuth() {
-        if (window.__BeePayAuthUnsubscribe)
-            return;
-        window.__BeePayAuthUnsubscribe = onAuthStateChanged(auth, async u => {
+        onAuthStateChanged(auth, async u => {
             currentUser = u;
             const yes = !!u;
             document.getElementById("authState").textContent = yes ? (u.email || "Authenticated") : "Guest";
@@ -185,8 +137,6 @@ const BeePay = {
                 document.getElementById("webhookLifecyclePanel").hidden = !yes;
             if (document.getElementById("providerAdapterPanel"))
                 document.getElementById("providerAdapterPanel").hidden = !yes;
-            if (document.getElementById("securityRbacPanel"))
-                document.getElementById("securityRbacPanel").hidden = !yes;
             if (document.getElementById("providerConfigPanel"))
                 document.getElementById("providerConfigPanel").hidden = !yes;
             if (document.getElementById("paymentRoutingPanel"))
@@ -216,18 +166,11 @@ const BeePay = {
                 }
                 this.lazyReadLoaded = new Set();
                 this.resetReadCache();
-                Object.keys(window).filter(k => k.startsWith("__BeePayAdminProfilePromise_")).forEach(k => { delete window[k]; });
                 document.getElementById("authMessage").textContent = "Belum login.";
                 return
             }
             try {
-                const profileKey = `__BeePayAdminProfilePromise_${u.uid}`;
-                let profilePromise = window[profileKey];
-                if (!profilePromise) {
-                    profilePromise = getDoc(doc(db, "admin_users", u.uid));
-                    window[profileKey] = profilePromise;
-                }
-                const snap = await profilePromise;
+                const snap = await getDoc(doc(db, "admin_users", u.uid));
                 if (!snap.exists()) {
                     document.getElementById("authMessage").textContent = "Akun terautentikasi, tetapi belum terdaftar sebagai admin BeePay.";
                     document.getElementById("adminName").textContent = u.email || "User";
@@ -257,23 +200,94 @@ const BeePay = {
         )
     },
     setupLazyAdminReads() {
-        // HIGH-TRAFFIC SAFE MODE (23.5.5): do not start Firestore list reads
-        // merely because an admin logged in or a list entered the viewport.
-        // The previous IntersectionObserver could turn a long admin page into
-        // multiple Firestore reads immediately after login. Under real traffic
-        // this creates unnecessary WebChannel activity and download usage.
-        //
-        // All existing loadX() methods remain intact and may still be called by
-        // explicit user actions / successful operations. Only the automatic
-        // post-login observer is disabled.
+        // Avoid a 12-collection read burst immediately after login.
+        // Each non-sensitive list is fetched once, when it approaches the viewport.
+        // User-triggered actions may still call their normal loadX() methods.
+        // Reconciliation is excluded from this observer and remains button-triggered.
         if (this.lazyReadObserver) {
             try {
-                this.lazyReadObserver.disconnect();
+                this.lazyReadObserver.disconnect()
             } catch (_) {}
-            this.lazyReadObserver = null;
         }
         this.lazyReadLoaded = new Set();
-        this.lazyReadAutoDisabled = true;
+
+        const jobs = [["intentList", "loadIntents"], ["checkoutList", "loadCheckouts"], ["webhookList", "loadWebhooks"], ["verificationList", "loadVerifications"], ["resultList", "loadResults"], ["ticketList", "loadTickets"], // Reconciliation is intentionally manual-trigger only.
+        // It queries the financial ledger through the trusted backend.
+        ["auditList", "loadAudits"], ["sandboxList", "loadSandboxRuns"], ["failureTestList", "loadFailureTests"], ["healthList", "loadHealthChecks"], ["auditChecklistList", "loadFinalAudits"]];
+
+        const readQueue = [];
+        let readBusy = false;
+
+        const drainReadQueue = () => {
+            if (readBusy || !readQueue.length)
+                return;
+            const job = readQueue.shift();
+            if (!job || !job.element)
+                return drainReadQueue();
+            readBusy = true;
+            Promise.resolve().then( () => this[job.methodName]()).catch(e => {
+                console.error("Lazy read error:", job.methodName, e);
+                this.lazyReadLoaded.delete(job.methodName);
+            }
+            ).finally( () => {
+                readBusy = false;
+                setTimeout(drainReadQueue, 120);
+            }
+            );
+        }
+        ;
+
+        const loadJob = (element, methodName) => {
+            if (!element || this.lazyReadLoaded.has(methodName))
+                return;
+            this.lazyReadLoaded.add(methodName);
+            readQueue.push({
+                element,
+                methodName
+            });
+            drainReadQueue();
+        }
+        ;
+
+        if ("IntersectionObserver" in window) {
+            this.lazyReadObserver = new IntersectionObserver(entries => {
+                entries.forEach(entry => {
+                    if (!entry.isIntersecting)
+                        return;
+                    const methodName = entry.target.dataset.beepayLazyRead;
+                    loadJob(entry.target, methodName);
+                    this.lazyReadObserver.unobserve(entry.target);
+                }
+                );
+            }
+            ,{
+                root: null,
+                rootMargin: "120px 0px 120px 0px",
+                threshold: 0.01
+            });
+
+            jobs.forEach( ([elementId,methodName]) => {
+                const element = document.getElementById(elementId);
+                if (!element)
+                    return;
+                element.dataset.beepayLazyRead = methodName;
+                this.lazyReadObserver.observe(element);
+            }
+            );
+        } else {
+            // Older browsers: retain compatibility, but schedule reads with a small
+            // stagger so login does not create a single synchronous burst.
+            let delay = 0;
+            jobs.forEach( ([elementId,methodName]) => {
+                const element = document.getElementById(elementId);
+                if (!element)
+                    return;
+                element.dataset.beepayLazyRead = methodName;
+                setTimeout( () => loadJob(element, methodName), delay);
+                delay += 250;
+            }
+            );
+        }
     },
     async login() {
         if (!auth)
@@ -347,24 +361,6 @@ const BeePay = {
     },
     bindProviderAdapter() {
         document.getElementById("providerAdapterTestBtn")?.addEventListener("click", () => this.runProviderAdapterTest())
-    },
-    bindSecurityRbac() {
-        document.getElementById("securityRbacTestBtn")?.addEventListener("click", () => this.runSecurityRbacTest());
-    },
-    bindHighTrafficListenerSafety() {
-        document.getElementById("highTrafficListenerSafetyTestBtn")?.addEventListener("click", () => this.runHighTrafficListenerSafetyTest());
-    },
-    bindRateLimit() {
-        document.getElementById("rateLimitTestBtn")?.addEventListener("click", () => this.runRateLimitTest());
-    },
-    bindModuleSearch() {
-        const input = document.getElementById("moduleSearchInput");
-        const clear = document.getElementById("moduleSearchClearBtn");
-        if (!input) return;
-        const apply = () => this.applyModuleSearch(input.value || "");
-        input.addEventListener("input", apply);
-        clear?.addEventListener("click", () => { input.value = ""; apply(); input.focus(); });
-        apply();
     },
     bindProviderConfig() {
         document.getElementById("providerConfigStatusBtn")?.addEventListener("click", () => this.loadProviderConfigStatus());
@@ -525,12 +521,7 @@ const BeePay = {
         try {
             const idToken = await currentUser.getIdToken();
             const controller = new AbortController();
-            // E2E is an intentionally heavy SANDBOX lifecycle test. Keep a
-            // bounded client budget without changing payment runtime behavior.
-            // Normal admin audits retain the shorter timeout.
-            const requestBudgetMs = kind === "endToEnd" ? 90000 : 45000;
-            const requestStartedAt = performance.now();
-            timer = setTimeout( () => controller.abort(), requestBudgetMs);
+            timer = setTimeout( () => controller.abort(), 45000);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -554,7 +545,7 @@ const BeePay = {
             box.textContent = `${labels[kind]} ${String(result.overall || "PASS").toUpperCase()}: PASS ${pass}${checked ? ` / ${checked}` : ""} · FAIL ${fail}. ${detail}`;
         } catch (e) {
             console.error(`BeePay ${labels[kind]} error:`, e);
-            box.textContent = `${labels[kind]} FAIL: ${e.name === "AbortError" ? `Request timeout setelah ${Math.round(requestBudgetMs / 1000)} detik.` : (e.message || e)}`;
+            box.textContent = `${labels[kind]} FAIL: ${e.name === "AbortError" ? "Request timeout setelah 45 detik." : (e.message || e)}`;
         } finally {
             if (timer)
                 clearTimeout(timer);
@@ -751,7 +742,7 @@ const BeePay = {
         }
         m.textContent = "Memproses sandbox melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -792,7 +783,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa setiap sandbox run...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -863,41 +854,36 @@ const BeePay = {
     },
     async createAuditEvent() {
         const m = document.getElementById("auditMessage");
-        if (!currentUser) {
+        if (!db || !currentUser) {
             m.textContent = "Login terlebih dahulu.";
-            return;
+            return
         }
-        const action = document.getElementById("auditAction").value.trim();
-        const target = document.getElementById("auditTarget").value.trim();
-        const severity = document.getElementById("auditSeverity").value;
+        const action = document.getElementById("auditAction").value.trim()
+          , target = document.getElementById("auditTarget").value.trim()
+          , severity = document.getElementById("auditSeverity").value;
         if (!action || !target) {
             m.textContent = "Action dan target wajib diisi.";
-            return;
+            return
         }
+        const id = `AUD-${Date.now()}`
+          , data = {
+            audit_id: id,
+            actor_uid: currentUser.uid,
+            action,
+            target_id: target,
+            severity,
+            source: "admin-ui",
+            trusted: false,
+            created_at: serverTimestamp()
+        };
         try {
-            const idToken = await currentUser.getIdToken(false);
-            const response = await fetch(config.API_URL, {
-                method: "POST",
-                headers: {"Content-Type": "text/plain;charset=utf-8"},
-                body: JSON.stringify({
-                    action: "create_audit_event",
-                    idToken,
-                    auditAction: action,
-                    targetId: target,
-                    severity
-                }),
-                cache: "no-store"
-            });
-            const result = await response.json();
-            if (!response.ok || !result.success) {
-                throw new Error(result.error || result.message || "Gagal mencatat audit.");
-            }
+            await addDoc(collection(db, "audit_logs"), data);
             document.getElementById("auditForm").reset();
             this.invalidateReadCache("audit_logs");
-            m.textContent = `Audit ${result.auditId} dicatat oleh trusted backend.`;
-            await this.loadAudits();
+            m.textContent = `Audit ${id} dicatat.`;
+            await this.loadAudits()
         } catch (e) {
-            m.textContent = "Gagal mencatat audit: " + e.message;
+            m.textContent = "Gagal mencatat audit: " + e.message
         }
     },
     async loadAudits() {
@@ -936,7 +922,7 @@ const BeePay = {
         const eventFilter = document.getElementById("reconEventId")?.value.trim() || "";
         const statusFilter = document.getElementById("reconStatus")?.value || "";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -969,26 +955,25 @@ const BeePay = {
     },
     async createTicketRecord() {
         const m = document.getElementById("ticketMessage");
-        if (!currentUser) {
+        if (!auth || !currentUser) {
             m.textContent = "Login terlebih dahulu.";
-            return;
+            return
         }
         if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
             m.textContent = "API Apps Script belum dikonfigurasi.";
-            return;
+            return
         }
-        const orderId = document.getElementById("ticketOrderId").value.trim();
-        const transactionId = document.getElementById("ticketTransactionId").value.trim();
-        const userId = document.getElementById("ticketUserId").value.trim();
-        const eventId = document.getElementById("ticketEventId").value.trim();
-        const status = document.getElementById("ticketStatus").value;
+        const orderId = document.getElementById("ticketOrderId").value.trim()
+          , transactionId = document.getElementById("ticketTransactionId").value.trim()
+          , userId = document.getElementById("ticketUserId").value.trim()
+          , eventId = document.getElementById("ticketEventId").value.trim()
+          , status = document.getElementById("ticketStatus").value;
         if (!orderId || !transactionId || !userId || !eventId) {
             m.textContent = "Order, Transaction, User dan Event wajib diisi.";
-            return;
+            return
         }
-        m.textContent = "Mencatat ticket ledger melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {"Content-Type": "text/plain;charset=utf-8"},
@@ -1004,15 +989,15 @@ const BeePay = {
                 cache: "no-store"
             });
             const result = await response.json();
-            if (!response.ok || !result.success) {
+            if (!response.ok || !result.success)
                 throw new Error(result.error || result.message || "Gagal mencatat ticket.");
-            }
             document.getElementById("ticketForm").reset();
             this.invalidateReadCache("tickets");
-            m.textContent = `Ticket ${result.ticketId} dicatat oleh trusted backend. Ticket belum aktif.`;
-            await this.loadTickets();
+            m.textContent = result.message || `Ticket ${result.ticketId} dicatat oleh trusted backend.`;
+            await this.loadTickets()
         } catch (e) {
-            m.textContent = "Gagal mencatat ticket: " + e.message;
+            console.error("BeePay create ticket error:", e);
+            m.textContent = "Gagal mencatat ticket: " + (e.message || e)
         }
     },
     async loadTickets() {
@@ -1036,8 +1021,12 @@ const BeePay = {
     },
     async createResultRecord() {
         const m = document.getElementById("resultMessage");
-        if (!db || !currentUser) {
+        if (!auth || !currentUser) {
             m.textContent = "Login terlebih dahulu.";
+            return
+        }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
+            m.textContent = "API Apps Script belum dikonfigurasi.";
             return
         }
         const intentId = document.getElementById("resultIntentId").value.trim()
@@ -1048,26 +1037,31 @@ const BeePay = {
             m.textContent = "Payment Intent ID dan Transaction ID wajib diisi.";
             return
         }
-        const id = `PR-${Date.now()}`
-          , data = {
-            payment_result_id: id,
-            payment_intent_id: intentId,
-            transaction_id: transactionId,
-            status,
-            provider_reference: ref || null,
-            trusted: false,
-            processed_by_backend: false,
-            created_by: currentUser.uid,
-            created_at: serverTimestamp()
-        };
         try {
-            await addDoc(collection(db, "payment_results"), data);
+            const idToken = await currentUser.getIdToken(true);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({
+                    action: "create_payment_result",
+                    idToken,
+                    paymentIntentId: intentId,
+                    transactionId,
+                    status,
+                    providerReference: ref
+                }),
+                cache: "no-store"
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success)
+                throw new Error(result.error || result.message || "Gagal mencatat payment result.");
             document.getElementById("resultForm").reset();
             this.invalidateReadCache("payment_results");
-            m.textContent = `Payment Result ${id} dicatat untuk QA. Tidak mengaktifkan tiket.`;
+            m.textContent = result.message || `Payment Result ${result.paymentResultId} dicatat oleh trusted backend.`;
             await this.loadResults()
         } catch (e) {
-            m.textContent = "Gagal mencatat result: " + e.message
+            console.error("BeePay create payment result error:", e);
+            m.textContent = "Gagal mencatat result: " + (e.message || e)
         }
     },
     async loadResults() {
@@ -1091,38 +1085,47 @@ const BeePay = {
     },
     async createVerificationRecord() {
         const m = document.getElementById("verificationMessage");
-        if (!db || !currentUser) {
+        if (!auth || !currentUser) {
             m.textContent = "Login terlebih dahulu.";
+            return
+        }
+        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) {
+            m.textContent = "API Apps Script belum dikonfigurasi.";
             return
         }
         const intentId = document.getElementById("verificationIntentId").value.trim()
           , ref = document.getElementById("verificationReference").value.trim()
           , amount = Number(document.getElementById("verificationAmount").value)
-          , result = document.getElementById("verificationResult").value;
+          , resultValue = document.getElementById("verificationResult").value;
         if (!intentId || !ref || !Number.isSafeInteger(amount) || amount < 1) {
             m.textContent = "Payment Intent, reference dan amount valid wajib diisi.";
             return
         }
-        const id = `VR-${Date.now()}`
-          , data = {
-            verification_id: id,
-            payment_intent_id: intentId,
-            provider_reference: ref,
-            observed_amount: amount,
-            result,
-            verified: false,
-            verified_by_backend: false,
-            created_by: currentUser.uid,
-            created_at: serverTimestamp()
-        };
         try {
-            await addDoc(collection(db, "verification_ledger"), data);
+            const idToken = await currentUser.getIdToken(true);
+            const response = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {"Content-Type": "text/plain;charset=utf-8"},
+                body: JSON.stringify({
+                    action: "create_verification_record",
+                    idToken,
+                    paymentIntentId: intentId,
+                    providerReference: ref,
+                    amount,
+                    result: resultValue
+                }),
+                cache: "no-store"
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success)
+                throw new Error(result.error || result.message || "Gagal mencatat verification.");
             document.getElementById("verificationForm").reset();
             this.invalidateReadCache("verification_ledger");
-            m.textContent = `Verification ${id} dicatat sebagai audit/QA. Status pembayaran tidak diubah.`;
+            m.textContent = result.message || `Verification ${result.verificationId} dicatat oleh trusted backend.`;
             await this.loadVerifications()
         } catch (e) {
-            m.textContent = "Gagal mencatat verification: " + e.message
+            console.error("BeePay create verification error:", e);
+            m.textContent = "Gagal mencatat verification: " + (e.message || e)
         }
     },
     async loadVerifications() {
@@ -1169,7 +1172,7 @@ const BeePay = {
         }
         m.textContent = "Memproses webhook melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1217,7 +1220,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan lifecycle webhook test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1253,7 +1256,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa provider runtime configuration...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1285,7 +1288,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Provider Configuration Boundary Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1318,7 +1321,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa payment channel routing...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1351,7 +1354,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Payment Channel Routing Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1384,7 +1387,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Payment Intent Lifecycle Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1420,7 +1423,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Missing Receipt Test 23.5.1...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1452,7 +1455,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Wrong Binding Test 23.5.1...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1482,43 +1485,22 @@ const BeePay = {
             m.textContent = "API Apps Script belum dikonfigurasi.";
             return
         }
-        let specimen = null;
-        let verified = false;
         m.textContent = "Menyiapkan concurrency specimen SANDBOX...";
         try {
-            const idToken = await currentUser.getIdToken(false);
-            const postJson = async (body, label) => {
-                try {
-                    const response = await fetch(config.API_URL, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "text/plain;charset=utf-8"
-                        },
-                        body: JSON.stringify(body),
-                        cache: "no-store"
-                    });
-                    const data = await parseJsonResponseSafe(response, label);
-                    return { ...data, httpOk: response.ok };
-                } catch (error) {
-                    return {
-                        success: false,
-                        error: `${label}: ${error?.message || error}`,
-                        networkError: true
-                    };
-                }
-            };
-
-            const prep = await postJson({
-                action: "sandbox_concurrency_prepare",
-                idToken
-            }, "Concurrency prepare");
+            const idToken = await currentUser.getIdToken(true);
+            const prepResponse = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify({
+                    action: "sandbox_concurrency_prepare",
+                    idToken
+                })
+            });
+            const prep = await prepResponse.json();
             if (!prep.success)
                 throw new Error(prep.error || "Gagal menyiapkan concurrency test.");
-
-            specimen = {
-                paymentIntentId: prep.paymentIntentId,
-                providerEventId: prep.providerEventId
-            };
             const webhookCount = Number(prep.concurrencyWebhookCount || 20);
             const reconCount = Number(prep.concurrencyReconciliationCount || 20);
             const webhookBody = {
@@ -1538,13 +1520,17 @@ const BeePay = {
             m.textContent = `Menjalankan ${webhookCount} duplicate webhook bersamaan...`;
             const webhookResults = await Promise.all(Array.from({
                 length: webhookCount
-            }, (_, i) => postJson(webhookBody, `Webhook #${i + 1}`)));
+            }, () => fetch(config.API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify(webhookBody)
+            }).then(r => r.json())));
             const processed = webhookResults.filter(x => x.success && !x.existing).length;
             const idempotent = webhookResults.filter(x => x.success && x.existing && x.idempotent).length;
             const rejected = webhookResults.filter(x => x.rejected).length;
-            const webhookErrors = webhookResults.filter(x => !x.success).length;
-            m.textContent = `Webhook concurrency selesai: ${processed} processed · ${idempotent} idempotent · ${rejected} rejected · ${webhookErrors} error. Menjalankan ${reconCount} reconciliation query bersamaan...`;
-
+            m.textContent = `Webhook concurrency selesai: ${processed} processed · ${idempotent} idempotent · ${rejected} rejected. Menjalankan ${reconCount} reconciliation query bersamaan...`;
             const reconBody = {
                 action: "reconciliation_query",
                 idToken,
@@ -1552,52 +1538,35 @@ const BeePay = {
             };
             const reconResults = await Promise.all(Array.from({
                 length: reconCount
-            }, (_, i) => postJson(reconBody, `Reconciliation #${i + 1}`)));
+            }, () => fetch(config.API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify(reconBody)
+            }).then(r => r.json())));
             const reconOk = reconResults.filter(x => x.success).length;
-            const reconErrors = reconResults.length - reconOk;
-
-            const verify = await postJson({
-                action: "sandbox_concurrency_verify",
-                idToken,
-                paymentIntentId: prep.paymentIntentId,
-                providerEventId: prep.providerEventId,
-                webhookCount,
-                reconciliationCount: reconCount
-            }, "Concurrency verify");
-            if (!verify.success && verify.overall !== "PASS" && !Array.isArray(verify.checks))
-                throw new Error(verify.error || "Concurrency verify tidak mengembalikan hasil JSON yang valid.");
-            verified = true;
-            const result = verify;
+            const verifyResponse = await fetch(config.API_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=utf-8"
+                },
+                body: JSON.stringify({
+                    action: "sandbox_concurrency_verify",
+                    idToken,
+                    paymentIntentId: prep.paymentIntentId,
+                    providerEventId: prep.providerEventId,
+                    webhookCount,
+                    reconciliationCount: reconCount
+                })
+            });
+            const result = await verifyResponse.json();
             const detail = (result.checks || []).map(c => `${c.pass ? "PASS" : "FAIL"}: ${c.name}${c.detail ? ` (${c.detail})` : ""}`).join(" · ");
-            const traffic = `Concurrent webhook: ${webhookResults.length} · processed=${processed} · idempotent=${idempotent} · rejected=${rejected} · errors=${webhookErrors} · reconciliation queries=${reconResults.length} · successful=${reconOk} · errors=${reconErrors}`;
-            const diagnostics = [...webhookResults, ...reconResults].filter(x => !x.success).slice(0, 3).map(x => x.error || "unknown error").join(" | ");
-            m.textContent = `Concurrency Test ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${traffic}. ${result.message || result.error || ""} ${diagnostics ? `Diagnostics: ${diagnostics}.` : ""} ${detail}`;
+            const traffic = `Concurrent webhook: ${webhookResults.length} · processed=${processed} · idempotent=${idempotent} · rejected=${rejected} · reconciliation queries=${reconResults.length} · successful=${reconOk}`;
+            m.textContent = `Concurrency Test ${result.overall || "FAIL"}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${traffic}. ${result.message || result.error || ""} ${detail}`;
         } catch (e) {
             console.error(e);
-            m.textContent = "Concurrency Test gagal: " + (e.message || e);
-        } finally {
-            // If prepare succeeded but verify could not complete, the next test
-            // should not inherit a stale sandbox specimen. All concurrent calls
-            // above are settled before this cleanup request is sent.
-            if (specimen && !verified) {
-                try {
-                    const cleanupToken = await currentUser.getIdToken(false);
-                    const cleanupResponse = await fetch(config.API_URL, {
-                        method: "POST",
-                        headers: { "Content-Type": "text/plain;charset=utf-8" },
-                        body: JSON.stringify({
-                            action: "sandbox_concurrency_cleanup",
-                            idToken: cleanupToken,
-                            paymentIntentId: specimen.paymentIntentId
-                        }),
-                        cache: "no-store"
-                    });
-                    const cleanup = await parseJsonResponseSafe(cleanupResponse, "Concurrency cleanup");
-                    if (!cleanup.success) console.warn("Concurrency cleanup warning:", cleanup);
-                } catch (cleanupError) {
-                    console.warn("Concurrency cleanup failed:", cleanupError);
-                }
-            }
+            m.textContent = "Concurrency Test gagal: " + e.message
         }
     },
 
@@ -1613,7 +1582,7 @@ const BeePay = {
         }
         m.textContent = "Menyiapkan mismatch concurrency specimen SANDBOX...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const prepResponse = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1715,7 +1684,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Recovery & Replay Test SANDBOX...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1748,7 +1717,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Reconciliation Integrity 23.5.1...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1781,7 +1750,7 @@ const BeePay = {
             return
         }
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1815,7 +1784,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Payment Receipt & Reconciliation Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1842,7 +1811,7 @@ const BeePay = {
             return
         }
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1870,7 +1839,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Universal Merchant & Upgrade Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1902,7 +1871,7 @@ const BeePay = {
             return
         }
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1930,7 +1899,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Merchant Registry & API Authentication Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1957,7 +1926,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Universal Merchant Payment API Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const r = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -1976,95 +1945,6 @@ const BeePay = {
             m.textContent = "Universal Merchant Payment API Test gagal: " + e.message
         }
     },
-    applyModuleSearch(rawQuery) {
-        const q = String(rawQuery || "").trim().toLowerCase();
-        const count = document.getElementById("moduleSearchCount");
-        const results = document.getElementById("moduleSearchResults");
-        const candidates = Array.from(document.querySelectorAll("main > section.panel:not(#moduleSearchPanel), main > section.modules"));
-        const visibleMatches = [];
-        candidates.forEach((el) => {
-            if (!el.dataset.searchBaseDisplay) el.dataset.searchBaseDisplay = el.style.display || "";
-            const text = String(el.textContent || "").toLowerCase();
-            const match = !q || text.includes(q);
-            el.style.display = match ? el.dataset.searchBaseDisplay : "none";
-            if (match && !el.hidden) {
-                const heading = el.querySelector("h2,h3")?.textContent?.trim() || "Module";
-                visibleMatches.push({el, heading});
-            }
-        });
-        if (!q) {
-            if (count) count.textContent = "Semua modul ditampilkan";
-            if (results) results.innerHTML = "";
-            return;
-        }
-        if (count) count.textContent = `${visibleMatches.length} modul cocok`;
-        if (results) {
-            results.innerHTML = visibleMatches.slice(0, 12).map(({el, heading}) => `<button type="button" class="module-result-chip" data-module-target="${this.escape(el.id || "")}">${this.escape(heading)}</button>`).join("");
-            results.querySelectorAll("[data-module-target]").forEach(btn => btn.addEventListener("click", () => {
-                const target = document.getElementById(btn.dataset.moduleTarget);
-                target?.scrollIntoView({behavior:"smooth", block:"start"});
-            }));
-        }
-    },
-    async runRateLimitTest() {
-        const m = document.getElementById("rateLimitTestMessage");
-        if (!m) return;
-        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
-        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
-        m.textContent = "Menjalankan Rate Limit & Abuse Protection Test...";
-        try {
-            const idToken = await currentUser.getIdToken(false);
-            const response = await fetch(config.API_URL, {method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"sandbox_rate_limit_test",idToken}),cache:"no-store"});
-            const result = await parseJsonResponseSafe(response, "Rate Limit & Abuse Protection Test");
-            if (!response.ok || !result.success) throw new Error(result.error || "Rate Limit & Abuse Protection Test gagal.");
-            const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
-            m.textContent=`Rate Limit & Abuse Protection ${result.overall}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
-        } catch(e) { console.error(e); m.textContent="Rate Limit / Abuse Protection Test gagal: "+(e.message||e); }
-    },
-    async runHighTrafficListenerSafetyTest() {
-        const m = document.getElementById("highTrafficListenerSafetyTestMessage");
-        if (!m) return;
-        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
-        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
-        m.textContent = "Menjalankan High-Traffic / Listener Safety Test...";
-        try {
-            const idToken = await currentUser.getIdToken(false);
-            const response = await fetch(config.API_URL, {
-                method:"POST",
-                headers:{"Content-Type":"text/plain;charset=utf-8"},
-                body:JSON.stringify({action:"sandbox_high_traffic_listener_safety_test",idToken}),
-                cache:"no-store"
-            });
-            const result = await parseJsonResponseSafe(response, "High-Traffic / Listener Safety Test");
-            if (!response.ok || !result.success) throw new Error(result.error || "High-Traffic / Listener Safety Test gagal.");
-            const detail=(result.checks||[]).map(x=>`${x.pass?"PASS":"FAIL"}: ${x.name}${x.detail?` (${x.detail})`:""}`).join(" · ");
-            m.textContent=`High-Traffic / Listener Safety ${result.overall}: PASS ${result.passCount||0} · FAIL ${result.failCount||0}. ${result.message||""} ${detail}`;
-        } catch(e) { console.error(e); m.textContent="High-Traffic / Listener Safety Test gagal: "+(e.message||e); }
-    },
-    async runSecurityRbacTest() {
-        const m = document.getElementById("securityRbacTestMessage");
-        if (!m) return;
-        if (!auth || !currentUser) { m.textContent = "Login admin terlebih dahulu."; return; }
-        if (!config?.API_URL || config.API_URL.startsWith("YOUR_")) { m.textContent = "API Apps Script belum dikonfigurasi."; return; }
-        m.textContent = "Menjalankan Security / Authorization / RBAC / Access Control Test...";
-        try {
-            const idToken = await currentUser.getIdToken(false);
-            const requestedRole = document.getElementById("securityRbacRequestedRole")?.value.trim() || "SUPER_ADMIN";
-            const response = await fetch(config.API_URL, {
-                method: "POST",
-                headers: {"Content-Type":"text/plain;charset=utf-8"},
-                body: JSON.stringify({action:"security_rbac_test", idToken, requestedRole}),
-                cache: "no-store"
-            });
-            const result = await parseJsonResponseSafe(response, "Security / RBAC Test");
-            if (!response.ok || !result.success) throw new Error(result.error || "Security / RBAC Test gagal.");
-            const detail = (result.checks || []).map(x => `${x.pass ? "PASS" : "FAIL"}: ${x.name}${x.detail ? ` (${x.detail})` : ""}`).join(" · ");
-            m.textContent = `Security / Authorization / RBAC / Access Control ${result.overall}: PASS ${result.passCount || 0} · FAIL ${result.failCount || 0}. ${result.message || ""} ${detail}`;
-        } catch (e) {
-            console.error(e);
-            m.textContent = "Security / RBAC Test gagal: " + (e.message || e);
-        }
-    },
     async runProviderAdapterTest() {
         const m = document.getElementById("providerAdapterTestMessage");
         if (!auth || !currentUser) {
@@ -2077,7 +1957,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan Provider Adapter Security Test...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2182,7 +2062,7 @@ const BeePay = {
             button.disabled = true;
         m.textContent = "Memvalidasi Checkout melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2254,7 +2134,7 @@ const BeePay = {
         }
         m.textContent = "Memeriksa binding Payment Intent → Transaction → Payment → Ticket...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2288,7 +2168,7 @@ const BeePay = {
         }
         m.textContent = "Menjalankan test idempotency Payment Intent...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2322,7 +2202,7 @@ const BeePay = {
         }
         m.textContent = "Membuat Sandbox Order melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2374,7 +2254,7 @@ const BeePay = {
         }
         m.textContent = "Membuat Payment Intent melalui trusted backend...";
         try {
-            const idToken = await currentUser.getIdToken(false);
+            const idToken = await currentUser.getIdToken(true);
             const response = await fetch(config.API_URL, {
                 method: "POST",
                 headers: {
@@ -2438,10 +2318,4 @@ const BeePay = {
         }[c]))
     }
 };
-
-// Expose the singleton for production diagnostics and browser-console health checks.
-// The application remains module-scoped internally; this only adds a safe read-only
-// reference so diagnostics such as window.BeePay.version work without changing flow.
-window.BeePay = BeePay;
-
 document.addEventListener("DOMContentLoaded", () => BeePay.init());
